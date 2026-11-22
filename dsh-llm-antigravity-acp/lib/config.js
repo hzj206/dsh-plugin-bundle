@@ -6,7 +6,7 @@
  */
 import z from '@deepseek-ai/schemastery';
 /** Reasoning effort ids accepted by the Antigravity ACP `thought_level` option. */
-export const EFFORTS = ['low', 'medium', 'high'];
+export const EFFORTS = ['low', 'medium', 'high', 'xhigh'];
 /**
  * What the route-health fingerprint may do with a Gemini 4 flagship (Argon or
  * Carbon) step it flags:

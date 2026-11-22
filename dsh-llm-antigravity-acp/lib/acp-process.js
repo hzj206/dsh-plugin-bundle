@@ -6,7 +6,7 @@
  * and refuses every agent-to-client capability DSH does not provide.
  * @module dsh-llm-antigravity-acp/acp-process
  */
-import { JsonRpcPeer, JsonRpcRemoteError } from "./jsonrpc.js";
+import { JsonRpcPeer, JsonRpcRemoteError } from './jsonrpc.js';
 /** One running `agy acp` front with its initialized link. */
 export class AcpProcess {
     options;

@@ -10,7 +10,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { asEngineMode } from "./config.js";
+import { asEngineMode } from './config.js';
 /** Maximum durable DSH -> ACP session bindings retained in `session-index.json`. */
 const MAX_PERSISTED_SESSIONS = 128;
 /** Reader and writer of the session index file. */

@@ -1,5 +1,14 @@
 # dsh-llm-antigravity-acp
 
+> **Fork 增强维护版**（基于 [lili-luo/dsh-plugin-bundle](https://github.com/lili-luo/dsh-plugin-bundle) 持续维护，遵循原仓库 MIT 协议）
+> - **DSH 安装源**：`github:hzj206/dsh-plugin-bundle#main&path:/dsh-llm-antigravity-acp`
+> - **相比上游 `0.4.0`（`0eee9ba`）已合入的增强**：
+>   - 全链路支持 `xhigh`（XHigh）思考强度（`config` / `catalog` / `cloudcode` / `runtime.observeSlotCatalog` / 设置页下拉框），修复会期重载后 `xhigh` 被三档白名单抹掉导致 `UNSUPPORTED_REASONING_EFFORT` 的问题
+>   - 补全 `Gemini 4 Neon`、`Gemini 4 Hydrogen`、`Orchestrator (Neon / Argon)` 展示名称
+>   - 为 `gpt-oss` 家族增加全局上下文窗口上限保护（最高 128K，避免被全局 512K/900K 配置越界覆盖）
+>   - 增强 Web GUI 系统提示词段落的整段中文化反指纹替换（同时保留上游单句改写兼容）
+>   - 兼容最新 DSH `@deepseek-ai/dsh-llm` 严格类型检查与 Windows 跨平台单元测试
+
 把本机已登录的 Google Antigravity CLI（`agy`）作为 DeepSeek Harness 的一级模型 provider 接入。模型出现在输入框右下角的模型选择器里，与 DeepSeek、GLM 等直连 provider 同级使用；工具、权限、压缩、子代理全部由 DSH 负责。
 
 ## 使用前请先看

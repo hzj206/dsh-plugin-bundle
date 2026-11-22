@@ -17,9 +17,9 @@
  *    Argon weekly bucket (`gemini-argon-wtu-weekly`) separately from Gemini 3.8.
  * @module dsh-llm-antigravity-acp/cloudcode
  */
-import { proxyUrlFromEnv } from "./accounts.js";
-import { EFFORTS } from "./config.js";
-import { decodeStoredCredential, readStoredCredentialRaw } from "./credential.js";
+import { proxyUrlFromEnv } from './accounts.js';
+import { EFFORTS } from './config.js';
+import { decodeStoredCredential, readStoredCredentialRaw } from './credential.js';
 /** Fallback order: Daily first (authoritative live usage), Sandbox second. Production `cloudcode-pa` rejects consumer OAuth tokens with HTTP 429 and is excluded. */
 export const CLOUD_CODE_HOSTS = [
     'https://daily-cloudcode-pa.googleapis.com',
@@ -349,13 +349,17 @@ function isCompliantAgentModel(id) {
     }
     return true;
 }
-const EFFORT_VARIANT_SUFFIX = /^(.+)-(low|medium|high)$/;
+const EFFORT_VARIANT_SUFFIX = /^(.+)-(xhigh|low|medium|high)$/;
 function stripEffortLabel(displayName) {
-    return displayName.replace(/\s*\((Low|Medium|High)\)\s*$/i, '').trim();
+    return displayName.replace(/\s*\((XHigh|Low|Medium|High)\)\s*$/i, '').trim();
 }
 const DEFAULT_FAMILY_DISPLAY_NAMES = {
     'gemini-4-carbon': 'Gemini 4 Carbon',
+    'gemini-4-neon': 'Gemini 4 Neon',
     'gemini-4-argon': 'Gemini 4 Argon',
+    'gemini-4-hydrogen': 'Gemini 4 Hydrogen',
+    'gemini-pro-orchestrator-neon': 'Orchestrator (Neon)',
+    'gemini-pro-orchestrator-g1-pro': 'Orchestrator (Argon)',
     'gemini-3.8-flash': 'Gemini 3.8 Flash',
     'claude-opus-5-5': 'Claude Opus 5.5',
     'claude-sonnet-5-5': 'Claude Sonnet 5.5',

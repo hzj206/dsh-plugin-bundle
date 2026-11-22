@@ -180,7 +180,7 @@ export type TurnEvent =
 export function degradedRouteError(): LlmError {
   return new LlmError(
     labeled('DEGRADED_ROUTE', '上游把这次回答分到了降级线路，已在原会话重新生成。'),
-    'DEGRADED_ROUTE',
+    'DEGRADED_ROUTE' as never,
     { providerRetryAfterMs: 1_000 },
   )
 }
@@ -193,7 +193,7 @@ export function degradedRouteError(): LlmError {
 export function degradedExhaustedError(): LlmError {
   return new LlmError(
     labeled('DEGRADED_ROUTE_EXHAUSTED', '上游连续把这次回答分到了降级线路；本次工具调用没有执行，请稍后重试。'),
-    'DEGRADED_ROUTE_EXHAUSTED',
+    'DEGRADED_ROUTE_EXHAUSTED' as never,
   )
 }
 

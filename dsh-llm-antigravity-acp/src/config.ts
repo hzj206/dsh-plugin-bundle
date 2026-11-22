@@ -9,7 +9,7 @@ import type { Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 
 /** Reasoning effort ids accepted by the Antigravity ACP `thought_level` option. */
-export const EFFORTS = ['low', 'medium', 'high'] as const
+export const EFFORTS = ['low', 'medium', 'high', 'xhigh'] as const
 /** One Antigravity reasoning effort. */
 export type Effort = typeof EFFORTS[number]
 

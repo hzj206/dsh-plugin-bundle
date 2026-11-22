@@ -9,14 +9,14 @@
  * @module dsh-llm-antigravity-acp
  */
 import { homedir } from 'node:os';
-import { accountVisibleModels, cliEnv } from "./accounts.js";
-import { AntigravityAdapter } from "./adapter.js";
-import { FALLBACK_MODELS } from "./catalog.js";
-import { current } from "./config.js";
-import { CONFIG_VERSION, migrateConfig, normalizeAccounts, storedEqual } from "./migrate.js";
-import { AntigravityRemote, registerRemote } from "./remote.js";
-import { AntigravityRuntime } from "./runtime.js";
-export { Config } from "./config.js";
+import { accountVisibleModels, cliEnv } from './accounts.js';
+import { AntigravityAdapter } from './adapter.js';
+import { FALLBACK_MODELS } from './catalog.js';
+import { current } from './config.js';
+import { CONFIG_VERSION, migrateConfig, normalizeAccounts, storedEqual } from './migrate.js';
+import { AntigravityRemote, registerRemote } from './remote.js';
+import { AntigravityRuntime } from './runtime.js';
+export { Config } from './config.js';
 export const name = 'llm-antigravity-acp';
 export const inject = ['llm', 'subprocess'];
 /**

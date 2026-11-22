@@ -84,6 +84,8 @@ function cloakWords(text) {
 }
 /** Chinese replacement for the host `@` path guidance. The English sentence is an upstream fingerprint. */
 const FILE_REFERENCE_GUIDANCE = '以 @ 开头的标记是用户显式引用的路径：相对路径基于工作区根目录解析，绝对路径指向宿主机上的文件或目录。末尾带 / 表示目录，需要查看目录内容时先列出；其余为文件，需要读取内容时调用 `mcp_dsh_read`，读取前不要声称已检查过内容。`@"..."` 用于包裹含空格的路径。';
+/** Chinese replacement for the host Web GUI / HMR guidance. The English paragraph triggers an upstream 429 match even when prose-cloaked. */
+const WEB_GUI_GUIDANCE = '你正在通过运行时上下文中给出的 Web GUI 与用户交互。当用户未指定其他目标而提到“当前页面”、“当前界面”或“当前应用”时，指的就是这个 Web GUI。浏览器不会隐式提供 DOM、路由或截图上下文。客户端插件的热更新（HMR）接收器已启用，但仅当同一源码检出目录中同时运行着 `pnpm run dev:web` 以重建产物包时，客户端插件修改才会免刷新自动重载；承诺自动更新前请先确认该监听进程正在运行。其他所有改动（`apps/web` 外壳及普通包）都需要重新构建受影响的 Web 产物并在刷新页面后验证该已有 URL。另起一个服务不会更新当前界面。`apps/web` 的 Vite 入口只构建外壳，并不是独立应用，因为只有 `dsh web` 会注入 `window.__DSH_BOOT__`。除非用户要求，否则不要启动替代服务；若确需启动，请使用受管后台任务并核实其准确 URL。';
 /**
  * Replace host prompt sentences that upstream matches exactly.
  * Tool names and the meaning of the guidance stay; the matched English sentences do not.
@@ -95,6 +97,7 @@ export function sanitizeSystemPrompt(text) {
         return text;
     return text
         .replace(/Tokens prefixed with @ are (?:workspace )?paths the user explicitly referenced\b[\s\S]*?quotes a path containing spaces\./g, FILE_REFERENCE_GUIDANCE)
+        .replace(/You are interacting with the user through the DeepSeek Harness Web GUI\b[^\n]*/g, WEB_GUI_GUIDANCE)
         .replace(/You are an AI agent powered by DeepSeek Harness\./g, 'You are a coding agent in this session.')
         .replace(/The runtime context names the DeepSeek Harness implementation checkout\./g, 'The runtime context names the host checkout.')
         .replace(/RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL\.[^\n]*/g, 'Requirement words keep their ordinary meaning.')

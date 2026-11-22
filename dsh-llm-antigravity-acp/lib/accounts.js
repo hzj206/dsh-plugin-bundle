@@ -15,8 +15,8 @@
 import { existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { decodeStoredCredential, readStoredCredentialRaw } from "./credential.js";
-import { defaultHome, prepareHome } from "./preflight.js";
+import { decodeStoredCredential, readStoredCredentialRaw } from './credential.js';
+import { defaultHome, prepareHome } from './preflight.js';
 /** Id of the implicit account that reuses this machine's own login. */
 export const SYSTEM_ACCOUNT_ID = 'default';
 /** Remark shown for the machine account until the user names it. */

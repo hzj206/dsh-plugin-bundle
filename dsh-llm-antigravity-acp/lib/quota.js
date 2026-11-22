@@ -11,8 +11,8 @@
  * (for example against a scripted fake CLI in unit tests).
  * @module dsh-llm-antigravity-acp/quota
  */
-import { SYSTEM_ACCOUNT_ID } from "./accounts.js";
-import { inspectCloudCodeAccount, } from "./cloudcode.js";
+import { SYSTEM_ACCOUNT_ID } from './accounts.js';
+import { inspectCloudCodeAccount, } from './cloudcode.js';
 /**
  * Whether one window is the weekly (7-day) bucket. Upstream either names the
  * window `weekly` or encodes it in the bucket id (`gemini-weekly`, `3p-7d`), so

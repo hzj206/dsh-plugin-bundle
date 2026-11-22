@@ -5,7 +5,7 @@
  * @module dsh-llm-antigravity-acp/adapter
  */
 import { LlmAdapter, resolveRetryPolicy } from '@deepseek-ai/dsh-llm';
-import { EFFORT_NAMES, nearestEffort } from "./catalog.js";
+import { EFFORT_NAMES, nearestEffort } from './catalog.js';
 /** Degraded-route failures are re-asked by the harness retry layer with the identical request. */
 const RETRYABLE_CODES = ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'DEGRADED_ROUTE'];
 const ANTIGRAVITY_RETRY_POLICY = resolveRetryPolicy({

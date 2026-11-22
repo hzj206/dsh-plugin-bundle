@@ -2014,6 +2014,7 @@ window.__ModuleLoader__.load({
       { value: 'low', label: 'Low' },
       { value: 'medium', label: 'Medium' },
       { value: 'high', label: 'High' },
+      { value: 'xhigh', label: 'XHigh' },
     ]
 
     /** Context-window choices, shared by the Settings row and the menu row. */

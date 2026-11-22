@@ -25,7 +25,7 @@ import {
   type CooldownKey, type Family, type LoginResult, type LoginTicket,
 } from './accounts.ts'
 import { ModelCatalog, intersectVisible, isListedModel, nearestEffort, type AvailableModel, type CatalogModel } from './catalog.ts'
-import { asDegradeAction, asEffort, asEngineMode, current, type AccountProfile, type Config, type DegradeAction, type Effort, type EngineMode } from './config.ts'
+import { asDegradeAction, asEffort, asEngineMode, current, EFFORTS, type AccountProfile, type Config, type DegradeAction, type Effort, type EngineMode } from './config.ts'
 import { AcpTurn, AWAIT_TOOL, AWAIT_TOOL_NAME, CALL_TOOL, CALL_TOOL_NAME, degradedRouteError, isReanswerFailure, pumpStep, relayNotice, type NativePermissionDenial, type ParkedCall } from './conversation.ts'
 import { unlockAccountKeychain } from './credential.ts'
 import {
@@ -316,7 +316,7 @@ export class AntigravityRuntime implements AccountAdmin {
 
   private baseContextWindow(model: string): number {
     const configured = this.configuredContextWindow()
-    if (configured > 0) return configured
+    if (configured > 0) return model.startsWith('gpt-oss') ? Math.min(configured, GPT_OSS_CONTEXT_WINDOW) : configured
     if (model.startsWith('gpt-oss')) return GPT_OSS_CONTEXT_WINDOW
     const discovered = this.catalog.maxTokensFor(model)
     const ceiling = this.primaryPreflight()?.unlock.status === 'unlocked' ? UNLOCKED_CONTEXT_WINDOW : LOCKED_CONTEXT_WINDOW
@@ -547,7 +547,7 @@ export class AntigravityRuntime implements AccountAdmin {
       if (available !== undefined && available.length > 0) {
         const map: Record<string, Effort[]> = { ...(slot.effortsByModel ?? {}) }
         for (const model of slot.availableModels) {
-          const offered = (['low', 'medium', 'high'] as const).filter(e => available.some(a => a.modelId === `${model.id}-${e}`))
+          const offered = EFFORTS.filter(e => available.some(a => a.modelId === `${model.id}-${e}`))
           map[model.id] = [...offered]
         }
         slot.effortsByModel = map

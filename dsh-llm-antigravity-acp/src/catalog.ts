@@ -64,10 +64,10 @@ export const FALLBACK_MODELS: readonly CatalogModel[] = [
 ]
 
 /** Display names of the efforts. */
-export const EFFORT_NAMES: Record<Effort, string> = { low: 'Low', medium: 'Medium', high: 'High' }
+export const EFFORT_NAMES: Record<Effort, string> = { low: 'Low', medium: 'Medium', high: 'High', xhigh: 'XHigh' }
 
 /** An id that already names one fixed effort instead of a selectable family. */
-const FIXED_EFFORT = /-(low|medium|high)$/
+const FIXED_EFFORT = /-(low|medium|high|xhigh)$/
 
 /**
  * Pick the offered effort closest to the requested one.

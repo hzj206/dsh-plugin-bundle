@@ -5,7 +5,7 @@
  * rules that read the slot alone live here.
  * @module dsh-llm-antigravity-acp/slots
  */
-import { accountEnv } from "./accounts.js";
+import { accountEnv } from './accounts.js';
 /**
  * A fresh, idle slot for one account: its layout, its environment, and empty
  * process/preflight/entitlement state.

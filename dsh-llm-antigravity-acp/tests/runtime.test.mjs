@@ -99,12 +99,12 @@ test('single turn streams reasoning, text, exact usage, and the selected model a
   assert.doesNotMatch(prompts()[0].system, /DeepSeek Harness/)
 })
 
-test('resolveModel declares the context window, three efforts, and in-history system updates', async () => {
+test('resolveModel declares the context window, four efforts, and in-history system updates', async () => {
   const { adapter } = makeRuntime({ config: { contextWindow: 1_048_576, defaultEffort: 'medium' } })
   const info = await adapter.resolveModel('antigravity', 'gemini-4-argon')
   assert.equal(info.context.contextWindow, 1_048_576)
   assert.equal(info.defaultMaxTokens, undefined)
-  assert.deepEqual(info.reasoning.efforts.map(e => e.id), ['low', 'medium', 'high'])
+  assert.deepEqual(info.reasoning.efforts.map(e => e.id), ['low', 'medium', 'high', 'xhigh'])
   assert.equal(info.reasoning.defaultEffort, 'medium')
   assert.equal(info.systemPromptUpdate, 'in-history')
   const listed = await adapter.listModels('antigravity')
@@ -535,10 +535,10 @@ test('every endpoint-advertised family including Sonnet and GPT-OSS appears in t
   const listed = (await adapter.listModels('antigravity')).map(m => m.id)
   assert.deepEqual(listed, ['gemini-4-carbon', 'gemini-4-argon', 'gemini-3.8-flash', 'claude-opus-5-5', 'claude-sonnet-5-5', 'gpt-oss-120b-medium'])
   const claude = await adapter.resolveModel('antigravity', 'claude-opus-5-5')
-  assert.deepEqual(claude.reasoning.efforts.map(e => e.id), ['low', 'medium', 'high'])
+  assert.deepEqual(claude.reasoning.efforts.map(e => e.id), ['low', 'medium', 'high', 'xhigh'])
   assert.equal(claude.context.contextWindow, 256_000)
   const sonnet = await adapter.resolveModel('antigravity', 'claude-sonnet-5-5')
-  assert.deepEqual(sonnet.reasoning.efforts.map(e => e.id), ['low', 'medium', 'high'])
+  assert.deepEqual(sonnet.reasoning.efforts.map(e => e.id), ['low', 'medium', 'high', 'xhigh'])
   const gpt = await adapter.resolveModel('antigravity', 'gpt-oss-120b-medium')
   assert.equal(gpt.reasoning, undefined)
   assert.equal(gpt.context.contextWindow, 131_072)
@@ -1544,22 +1544,24 @@ test('live configure keeps the machine account row and its system flag', () => {
 
 test('the context window is a global default narrowed by every account that can serve the model', () => {
   const { runtime } = makeRuntime({ config: { contextWindow: 900_000 } })
-  const windows = () => runtime.contextWindowFor('gpt-oss-120b-medium')
-  assert.equal(windows(), 900_000, 'the global default applies while every account follows it')
+  const geminiWindow = () => runtime.contextWindowFor('gemini-4-argon')
+  const gptOssWindow = () => runtime.contextWindowFor('gpt-oss-120b-medium')
+  assert.equal(geminiWindow(), 900_000, 'the global default applies while every account follows it')
+  assert.equal(gptOssWindow(), 131_072, 'GPT-OSS stays capped at its 128K ceiling even with a larger global default')
   runtime.configure({ accounts: [runtimeAccount('default', { system: true, contextWindow: 512_000 })] })
-  assert.equal(windows(), 512_000)
+  assert.equal(geminiWindow(), 512_000)
   runtime.configure({ accounts: [runtimeAccount('default', { system: true, contextWindow: 1_048_576 })] })
-  assert.equal(windows(), 900_000, 'an account can narrow the global window, never widen it')
+  assert.equal(geminiWindow(), 900_000, 'an account can narrow the global window, never widen it')
   runtime.configure({ contextWindow: 0, accounts: [runtimeAccount('default', { system: true })] })
-  assert.equal(windows(), 131_072, 'with no global override GPT-OSS keeps its own window')
+  assert.equal(gptOssWindow(), 131_072, 'with no global override GPT-OSS keeps its own window')
   runtime.configure({ accounts: [runtimeAccount('default', { system: true, contextWindow: 100_000 })] })
-  assert.equal(windows(), 100_000)
+  assert.equal(gptOssWindow(), 100_000)
   runtime.configure({
     contextWindow: 900_000,
     accounts: [runtimeAccount('default', { system: true, contextWindow: 512_000, visibleModels: ['claude-opus-5-5'] })],
   })
-  assert.equal(runtime.servesModel('default', 'gpt-oss-120b-medium'), false, 'an account visibleModels list still narrows on its own')
-  assert.equal(windows(), 900_000, 'an account that cannot serve the model never narrows its window')
+  assert.equal(runtime.servesModel('default', 'gemini-4-argon'), false, 'an account visibleModels list still narrows on its own')
+  assert.equal(geminiWindow(), 900_000, 'an account that cannot serve the model never narrows its window')
 })
 
 test('Windows preflight locates agy.exe in LOCALAPPDATA and PATH while skipping IDE shims and WindowsApps stubs', async () => {

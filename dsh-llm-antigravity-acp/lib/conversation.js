@@ -11,9 +11,9 @@
  * @module dsh-llm-antigravity-acp/conversation
  */
 import { LlmError, ToolCallId } from '@deepseek-ai/dsh-llm';
-import { AGENT_TOOL_PREFIX, CALL_TOOL_NAME } from "./history.js";
-import { labeled } from "./labels.js";
-import { AsyncQueue, deferred } from "./util.js";
+import { AGENT_TOOL_PREFIX, CALL_TOOL_NAME } from './history.js';
+import { labeled } from './labels.js';
+import { AsyncQueue, deferred } from './util.js';
 export { CALL_TOOL_NAME };
 /** Agent-side transport retry notice streamed as message text, e.g. `⚠ API error (attempt 1): …`. */
 const AGENT_RETRY_NOTICE = /^\s*⚠\s*(?:Error:\s*)?API error \(attempt \d+\)/i;

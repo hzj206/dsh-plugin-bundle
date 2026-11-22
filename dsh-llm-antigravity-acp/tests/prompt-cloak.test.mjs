@@ -31,6 +31,11 @@ test('known fingerprint sentences are rewritten before any zero-width spacing', 
   assert.match(sanitized, /以 @ 开头的标记是用户显式引用的路径/)
   assert.match(sanitized, /`mcp_dsh_read`/)
   assert.match(sanitized, /The checkout location stays separate/)
+
+  const fullWebGui = 'You are interacting with the user through the DeepSeek Harness Web GUI given in the runtime context. The browser provides no implicit DOM, route, or screenshot context. Starting another server does not update this GUI.'
+  const localizedWebGui = sanitizeSystemPrompt(fullWebGui)
+  assert.match(localizedWebGui, /你正在通过运行时上下文中给出的 Web GUI 与用户交互/)
+  assert.doesNotMatch(localizedWebGui, /DeepSeek Harness Web GUI/)
 })
 
 test('prose words of five or more letters gain one zero-width space while code, tags, urls, paths, and tool ids stay literal', () => {

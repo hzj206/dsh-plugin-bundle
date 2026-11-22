@@ -997,13 +997,13 @@ test('SettingsCard keeps its four choice rows mutually exclusive', async () => {
   assert.equal(choices().length, 4)
   assert.equal(expandedRows()[0].props['aria-expanded'], true)
 
-  // Click "默认思考" -> the window panel folds away, only the 3 efforts show.
+  // Click "默认思考" -> the window panel folds away, only the 4 efforts show.
   expandedRows()[1].props.onClick()
   await flush()
   assert.equal(expandedRows()[0].props['aria-expanded'], false)
   assert.equal(expandedRows()[1].props['aria-expanded'], true)
-  assert.equal(choices().length, 3)
-  assert.deepEqual(choices().map(textOf), ['Low', 'Medium', 'High'])
+  assert.equal(choices().length, 4)
+  assert.deepEqual(choices().map(textOf), ['Low', 'Medium', 'High', 'XHigh'])
 
   // Click "超长续写" -> the effort panel folds away, only the 3 decodes show.
   expandedRows()[2].props.onClick()

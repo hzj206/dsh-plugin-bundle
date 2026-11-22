@@ -11,10 +11,10 @@
  */
 import { randomBytes } from 'node:crypto';
 import { LlmError } from '@deepseek-ai/dsh-llm';
-import { bridgeSystemPrompt, MCP_SERVER_NAME, nativeBridgeSystemPrompt } from "./history.js";
-import { labeled } from "./labels.js";
-import { recordReportedToolCall } from "./tool-bridge.js";
-import { digest } from "./util.js";
+import { bridgeSystemPrompt, MCP_SERVER_NAME, nativeBridgeSystemPrompt } from './history.js';
+import { labeled } from './labels.js';
+import { recordReportedToolCall } from './tool-bridge.js';
+import { digest } from './util.js';
 /** Purpose of the conversation serving the user-visible turn rather than an auxiliary call. */
 export const MAIN_PURPOSE = 'main';
 /** Fresh bookkeeping for one ACP session. */

@@ -11,28 +11,28 @@ import { existsSync, realpathSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { LlmError } from '@deepseek-ai/dsh-llm';
-import { AcpProcess } from "./acp-process.js";
-import { applyModelAndEffort, detachBridge, freshReanswer, historyPrefixIntact, isOwnMessage, MAIN_PURPOSE, mountBridge, pendingInput, permissionState, planPrompt, } from "./acp-session.js";
-import { AccountPool, accountProfileOf, accountVisibleModels, buildLayouts, ensureLayout, familyForModel, loginCommand, pluginHome, proxyUrlFromEnv, readAccountEmail, SYSTEM_ACCOUNT_ID, TRANSIENT_COOLDOWN_MS, } from "./accounts.js";
-import { ModelCatalog, intersectVisible, isListedModel, nearestEffort } from "./catalog.js";
-import { asDegradeAction, asEffort, asEngineMode, current } from "./config.js";
-import { AcpTurn, AWAIT_TOOL, AWAIT_TOOL_NAME, CALL_TOOL, CALL_TOOL_NAME, degradedRouteError, isReanswerFailure, pumpStep, relayNotice } from "./conversation.js";
-import { unlockAccountKeychain } from "./credential.js";
-import { AGENT_TOOL_PREFIX, inputPrompt, LOCKED_REPLAY_BUDGET_BYTES, prepareNativeRequest, renderFullToolContracts, renderTranscript, replayPrompt, splitSystem, UNLOCKED_REPLAY_BUDGET_BYTES, } from "./history.js";
-import { labeled } from "./labels.js";
-import { JsonRpcClosedError, JsonRpcRemoteError } from "./jsonrpc.js";
-import { McpBridge } from "./mcp-bridge.js";
-import { assertSupportedAgyVersion, BRIDGE_AGENT, checkUnlock, defaultPatchScript, GPT_OSS_CONTEXT_WINDOW, LOCKED_CONTEXT_WINDOW, readVersion, resolveAgyBinary, syncOAuthToken, UNLOCKED_CONTEXT_WINDOW, } from "./preflight.js";
-import { groupForModel, isWeeklyBucket, QuotaReader, resolveModelQuota } from "./quota.js";
-import { RouteHealth } from "./route-health.js";
-import { binaryDigest, pluginBuildDigest } from "./run-fingerprint.js";
-import { SessionStore } from "./session-store.js";
-import { newSlot, rebaseSlot, slotDeniesModel, slotDisablesModel } from "./slots.js";
-import { answerPermission as decidePermission, boundBridgeContent, consumeToolDelta, filterToolsForEngineMode, MAX_EAGER_BRIDGE_TOOL_BYTES, resolveActiveToolSchemas, toBridgeTools, } from "./tool-bridge.js";
-import { hasGenMetadata, isGemini4Flagship, peekMaxGenMetadataIdx, peekMaxModelStepIdx, readGenUsageAfter, readModelStepTail, readModelStepsAfter, sessionDbPath, } from "./usage-db.js";
-import { delay, digest, KeyedMutex } from "./util.js";
+import { AcpProcess } from './acp-process.js';
+import { applyModelAndEffort, detachBridge, freshReanswer, historyPrefixIntact, isOwnMessage, MAIN_PURPOSE, mountBridge, pendingInput, permissionState, planPrompt, } from './acp-session.js';
+import { AccountPool, accountProfileOf, accountVisibleModels, buildLayouts, ensureLayout, familyForModel, loginCommand, pluginHome, proxyUrlFromEnv, readAccountEmail, SYSTEM_ACCOUNT_ID, TRANSIENT_COOLDOWN_MS, } from './accounts.js';
+import { ModelCatalog, intersectVisible, isListedModel, nearestEffort } from './catalog.js';
+import { asDegradeAction, asEffort, asEngineMode, current, EFFORTS } from './config.js';
+import { AcpTurn, AWAIT_TOOL, AWAIT_TOOL_NAME, CALL_TOOL, CALL_TOOL_NAME, degradedRouteError, isReanswerFailure, pumpStep, relayNotice } from './conversation.js';
+import { unlockAccountKeychain } from './credential.js';
+import { AGENT_TOOL_PREFIX, inputPrompt, LOCKED_REPLAY_BUDGET_BYTES, prepareNativeRequest, renderFullToolContracts, renderTranscript, replayPrompt, splitSystem, UNLOCKED_REPLAY_BUDGET_BYTES, } from './history.js';
+import { labeled } from './labels.js';
+import { JsonRpcClosedError, JsonRpcRemoteError } from './jsonrpc.js';
+import { McpBridge } from './mcp-bridge.js';
+import { assertSupportedAgyVersion, BRIDGE_AGENT, checkUnlock, defaultPatchScript, GPT_OSS_CONTEXT_WINDOW, LOCKED_CONTEXT_WINDOW, readVersion, resolveAgyBinary, syncOAuthToken, UNLOCKED_CONTEXT_WINDOW, } from './preflight.js';
+import { groupForModel, isWeeklyBucket, QuotaReader, resolveModelQuota } from './quota.js';
+import { RouteHealth } from './route-health.js';
+import { binaryDigest, pluginBuildDigest } from './run-fingerprint.js';
+import { SessionStore } from './session-store.js';
+import { newSlot, rebaseSlot, slotDeniesModel, slotDisablesModel } from './slots.js';
+import { answerPermission as decidePermission, boundBridgeContent, consumeToolDelta, filterToolsForEngineMode, MAX_EAGER_BRIDGE_TOOL_BYTES, resolveActiveToolSchemas, toBridgeTools, } from './tool-bridge.js';
+import { hasGenMetadata, isGemini4Flagship, peekMaxGenMetadataIdx, peekMaxModelStepIdx, readGenUsageAfter, readModelStepTail, readModelStepsAfter, sessionDbPath, } from './usage-db.js';
+import { delay, digest, KeyedMutex } from './util.js';
 // The tool-bridge helpers stay importable from this module for existing consumers.
-export { boundBridgeContent, boundBridgeToolText, compactBridgeTool, consumeToolDelta, filterToolsForEngineMode, MAX_BRIDGE_RESULT_BYTES, MAX_EAGER_BRIDGE_TOOL_BYTES, NATIVE_OVERLAPPING_DSH_TOOLS, resolveActiveToolSchemas, } from "./tool-bridge.js";
+export { boundBridgeContent, boundBridgeToolText, compactBridgeTool, consumeToolDelta, filterToolsForEngineMode, MAX_BRIDGE_RESULT_BYTES, MAX_EAGER_BRIDGE_TOOL_BYTES, NATIVE_OVERLAPPING_DSH_TOOLS, resolveActiveToolSchemas, } from './tool-bridge.js';
 /** Parked calls answer with a still-running notice before Gemini cache TTL expiry and agy's 180-second MCP deadline. */
 export const DEFAULT_RELAY_AFTER_MS = 85_000;
 /** Automatic re-answers granted for one identical request before a degraded answer is delivered as it is. Matches the harness request-retry budget so the plugin never gives up while DSH would still retry. */
@@ -192,7 +192,7 @@ export class AntigravityRuntime {
     baseContextWindow(model) {
         const configured = this.configuredContextWindow();
         if (configured > 0)
-            return configured;
+            return model.startsWith('gpt-oss') ? Math.min(configured, GPT_OSS_CONTEXT_WINDOW) : configured;
         if (model.startsWith('gpt-oss'))
             return GPT_OSS_CONTEXT_WINDOW;
         const discovered = this.catalog.maxTokensFor(model);
@@ -421,7 +421,7 @@ export class AntigravityRuntime {
             if (available !== undefined && available.length > 0) {
                 const map = { ...(slot.effortsByModel ?? {}) };
                 for (const model of slot.availableModels) {
-                    const offered = ['low', 'medium', 'high'].filter(e => available.some(a => a.modelId === `${model.id}-${e}`));
+                    const offered = EFFORTS.filter(e => available.some(a => a.modelId === `${model.id}-${e}`));
                     map[model.id] = [...offered];
                 }
                 slot.effortsByModel = map;

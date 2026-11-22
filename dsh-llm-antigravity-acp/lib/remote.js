@@ -5,8 +5,8 @@
  * @module dsh-llm-antigravity-acp/remote
  */
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol';
-import { SYSTEM_ACCOUNT_LABEL } from "./accounts.js";
-import { asDegradeAction, asEffort, asEngineMode } from "./config.js";
+import { SYSTEM_ACCOUNT_LABEL } from './accounts.js';
+import { asDegradeAction, asEffort, asEngineMode } from './config.js';
 /** Package name used for Typert descriptor identities. */
 export const PACKAGE_NAME = 'dsh-llm-antigravity-acp';
 /** Cordis service key and wire namespace. */

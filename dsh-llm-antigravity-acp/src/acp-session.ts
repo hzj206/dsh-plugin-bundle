@@ -350,7 +350,7 @@ async function confirmConfigOption(
   const actual = option?.currentValue === undefined ? 'undefined' : option.currentValue
   throw new LlmError(
     labeled('INVALID_MODEL_CONFIG', `Antigravity kept ${kind} at "${actual}" after switching to "${target}"`),
-    'INVALID_MODEL_CONFIG',
+    'INVALID_MODEL_CONFIG' as never,
   )
 }
 

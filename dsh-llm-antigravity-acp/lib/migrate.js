@@ -9,7 +9,7 @@
  * `changed === false`.
  * @module dsh-llm-antigravity-acp/migrate
  */
-import { accountVisibleModels, familyForModel, MODEL_FAMILIES, SYSTEM_ACCOUNT_ID } from "./accounts.js";
+import { accountVisibleModels, familyForModel, MODEL_FAMILIES, SYSTEM_ACCOUNT_ID } from './accounts.js';
 /**
  * Version written to every migrated configuration. From version 2 on the
  * account list is the only truth for the machine account, so a list without a

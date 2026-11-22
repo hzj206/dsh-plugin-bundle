@@ -11,9 +11,9 @@
 import { lstatSync, readlinkSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AWAIT_TOOL_NAME, CALL_TOOL_NAME } from "./conversation.js";
-import { AGENT_TOOL_PREFIX, cloakProse, MCP_SERVER_NAME } from "./history.js";
-import { digest } from "./util.js";
+import { AWAIT_TOOL_NAME, CALL_TOOL_NAME } from './conversation.js';
+import { AGENT_TOOL_PREFIX, cloakProse, MCP_SERVER_NAME } from './history.js';
+import { digest } from './util.js';
 /**
  * DSH built-in filesystem, shell, job, and MCP-resource tools that duplicate
  * Antigravity's own native workspace tools and are filtered out in `native` mode.

@@ -7,7 +7,7 @@
  * @module dsh-llm-antigravity-acp/catalog
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { EFFORTS } from "./config.js";
+import { EFFORTS } from './config.js';
 /**
  * Whether one id is offered by an allowlist that may only narrow.
  * @param id - family id.
@@ -41,9 +41,9 @@ export const FALLBACK_MODELS = [
     { id: 'gpt-oss-120b-medium', name: 'GPT-OSS 120B (Medium)' },
 ];
 /** Display names of the efforts. */
-export const EFFORT_NAMES = { low: 'Low', medium: 'Medium', high: 'High' };
+export const EFFORT_NAMES = { low: 'Low', medium: 'Medium', high: 'High', xhigh: 'XHigh' };
 /** An id that already names one fixed effort instead of a selectable family. */
-const FIXED_EFFORT = /-(low|medium|high)$/;
+const FIXED_EFFORT = /-(low|medium|high|xhigh)$/;
 /**
  * Pick the offered effort closest to the requested one.
  * @param wanted - requested effort.
