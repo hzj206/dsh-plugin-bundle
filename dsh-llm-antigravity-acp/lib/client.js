@@ -2640,6 +2640,10 @@ window.__ModuleLoader__.load({
           if (q && typeof q === 'object' && typeof q.model === 'string' && q.model !== model) return
           setQuota(q && typeof q === 'object' ? q : null)
           setError(q && q.status === 'error' ? q.error || null : null)
+          // Re-sync status once the remote service has answered `quota`, so
+          // cold-boot mounts where `statusNow()` ran before remote connected
+          // still hydrate the account list and per-session pin state.
+          syncStatus()
         } catch (e) {
           if (seq !== seqRef.current || model !== modelRef.current) return
           setError(e instanceof Error ? e.message : String(e))
@@ -2774,18 +2778,22 @@ window.__ModuleLoader__.load({
       const currentAccountRow = currentAccountId
         ? statusAccounts.find((a) => a.id === currentAccountId) || null
         : null
-      const accountText = quota && (quota.accountLabel || quota.accountId)
+      const rawAccountLabel = quota && (quota.accountLabel || quota.accountId)
         ? String(quota.accountLabel || quota.accountId)
-        : currentAccountRow
-          ? accountTitle(currentAccountRow)
-          : ''
+        : ''
+      const isWinRuntime = runtimeStatus && runtimeStatus.platform === 'win32'
+      const accountText = rawAccountLabel === SYSTEM_ACCOUNT_LABEL
+        ? t(isWinRuntime ? 'This PC' : 'This Mac', '本机')
+        : rawAccountLabel
+          || (currentAccountRow ? accountTitle(currentAccountRow) : '')
       const planText = quota && (quota.subscriptionName || quota.subscriptionTier)
         ? String(quota.subscriptionName || quota.subscriptionTier)
         : currentAccountRow && (currentAccountRow.subscriptionName || currentAccountRow.subscriptionTier)
           ? String(currentAccountRow.subscriptionName || currentAccountRow.subscriptionTier)
           : ''
       const attribution = [accountText, planText].filter(Boolean).join(' · ')
-      const showMultiAccountUi = statusAccounts.length >= 2 && typeof props.client.switchAccount === 'function'
+      const showPillAccountChip = statusAccounts.length >= 2 && typeof props.client.switchAccount === 'function'
+      const showSessionAccountPanel = statusAccounts.length >= 1 && typeof props.client.switchAccount === 'function'
       const summaryPctFor = (acc) => {
         if (acc.id === currentAccountId && primary && Number.isFinite(primary.remainingFraction)) {
           return primary.remainingFraction
@@ -2866,7 +2874,7 @@ window.__ModuleLoader__.load({
                 opacity: unavailable ? 0.66 : 1,
               },
             }, pillValue)),
-          showMultiAccountUi && accountText ? h('span', {
+          showPillAccountChip && accountText ? h('span', {
             className: 'dsh-agy-pill-acc-chip',
             'data-agy-pill-account-chip': 'true',
           }, accountText) : null,
@@ -3047,7 +3055,7 @@ window.__ModuleLoader__.load({
               h('span', { style: { fontVariantNumeric: 'tabular-nums', fontWeight: 500, textAlign: 'right' } }, paused ? t('n/a', '不适用') : pct(b.remainingFraction)),
               h('span', { style: { opacity: 0.55, textAlign: 'right', fontSize: 11, fontVariantNumeric: 'tabular-nums' } }, paused ? '' : resetLabel(b.resetTime)))
           })) : null,
-          showMultiAccountUi ? h('div', {
+          showSessionAccountPanel ? h('div', {
             className: 'dsh-agy-session-switcher',
             'data-agy-session-switcher': 'true',
             'data-agy-quota-account': accountText,
@@ -3077,6 +3085,8 @@ window.__ModuleLoader__.load({
                     : 'dsh-agy-session-tier'
                 const frac = summaryPctFor(acc)
                 const isSwitchingThis = switchingId === acc.id
+                const displayName = accountTitle(acc)
+                const rowSubtitle = acc.email && acc.email !== displayName ? acc.email : ''
                 return h('button', {
                   key: acc.id,
                   type: 'button',
@@ -3086,15 +3096,17 @@ window.__ModuleLoader__.load({
                   'data-agy-pill-switch-account': acc.id,
                   'data-agy-pill-account-selected': isSelected ? 'true' : 'false',
                   disabled: !canSelect || switchingId !== null,
-                  title: [accountTitle(acc), acc.email && acc.email !== accountTitle(acc) ? acc.email : '', acc.subscriptionName || rowTier].filter(Boolean).join(' · '),
+                  style: statusAccounts.length < 2 && isSelected ? { cursor: 'default' } : undefined,
+                  title: [displayName, rowSubtitle, acc.subscriptionName || rowTier].filter(Boolean).join(' · '),
                   onClick: () => {
-                    if (isSelected && pinnedAccountId === acc.id) return
+                    if (isSelected && (pinnedAccountId === acc.id || statusAccounts.length < 2)) return
                     void switchSessionAccount(acc.id)
                   },
                 },
                   h('span', { className: 'dsh-agy-session-acc-left' },
                     h('span', { className: 'dsh-agy-session-acc-dot', 'aria-hidden': 'true' }, isSwitchingThis ? '…' : (isSelected ? '✓' : '')),
-                    h('span', { className: 'dsh-agy-session-acc-name' }, accountTitle(acc))),
+                    h('span', { className: 'dsh-agy-session-acc-name' },
+                      statusAccounts.length === 1 && rowSubtitle ? `${displayName} (${rowSubtitle})` : displayName)),
                   h('span', { className: 'dsh-agy-session-acc-right' },
                     rowTier ? h('span', { className: rowTierCls }, rowTier) : null,
                     acc.tosSuspended === true
@@ -3107,6 +3119,13 @@ window.__ModuleLoader__.load({
                             ? h('span', { style: { opacity: 0.85, color: frac < 0.15 ? '#d9534f' : 'inherit' } }, pct(frac))
                             : null))
               })),
+            statusAccounts.length === 1 ? h('div', {
+              'data-agy-single-account-hint': 'true',
+              style: { opacity: 0.62, fontSize: 11, lineHeight: 1.4, whiteSpace: 'normal', padding: '1px 2px 0' },
+            }, t(
+              'Add or import more accounts in Settings → Antigravity to switch per session here.',
+              '在「设置 → Antigravity」添加或导入更多账号后，即可在此按会话一键切换。',
+            )) : null,
             switchError ? h('div', {
               role: 'alert',
               'data-agy-switch-error': 'true',

@@ -2470,3 +2470,55 @@ test('QuotaPill renders per-session account switcher in popover, displays pill a
 
   view.unmount()
 })
+
+test('QuotaPill localizes This Mac to 本机 and renders the session account panel with guidance even when only 1 account is configured', async () => {
+  const { registered, mount, store } = loadClientPlugin({
+    language: 'zh-CN',
+    remoteService: {
+      status: () => ({
+        state: 'ready',
+        platform: 'win32',
+        multiAccountMode: 'concurrent',
+        activeAccountId: 'default',
+        accounts: [{
+          id: 'default', label: 'This Mac', system: true, enabled: true, state: 'ready',
+          email: 'alice@example.com', subscriptionTier: 'PRO', subscriptionName: 'Google AI Pro',
+          hasRefreshToken: true, quotaSummary: { gemini: 0.72, primary: 0.72 },
+        }],
+      }),
+      quota: async (req) => ({
+        status: 'ok',
+        model: req.model,
+        accountId: 'default',
+        accountLabel: 'This Mac',
+        subscriptionTier: 'PRO',
+        subscriptionName: 'Google AI Pro',
+        updatedAt: new Date(FIXED_NOW).toISOString(),
+        groups: [{
+          kind: 'gemini', name: 'Gemini Models', description: '',
+          buckets: [{ id: 'weekly', name: 'Weekly', window: 'weekly', remainingFraction: 0.72, resetTime: isoAfterHours(60) }],
+        }],
+      }),
+      switchAccount: async () => ({}),
+    },
+  })
+  store.setCurrent({ provider: 'antigravity', model: 'gemini-4-neon' })
+
+  const slot = registered.get('conversation.input.right')
+  const view = mount(slot.Component, slot.meta.inject('sess-single'))
+  await flush()
+
+  const pillBtn = findOne(view.tree, (n) => n.tag === 'button')
+  assert.equal(pillBtn.props['data-agy-quota-account'], '本机')
+  assert.equal(findOne(pillBtn, (n) => n.props && n.props['data-agy-pill-account-chip'] === 'true'), null, 'single-account pill stays compact without chip')
+
+  pillBtn.props.onClick()
+  await flush()
+
+  const switcher = findOne(view.tree, (n) => n.props && n.props['data-agy-session-switcher'] === 'true')
+  assert.ok(switcher, 'popover shows session account section even with 1 account')
+  assert.ok(!textOf(switcher).includes('This Mac'), 'popover must not leak raw This Mac label on zh-CN')
+  assert.match(textOf(switcher), /本机.*alice@example\.com.*PRO.*72%/)
+  assert.ok(findOne(switcher, (n) => n.props && n.props['data-agy-single-account-hint'] === 'true'))
+  view.unmount()
+})
