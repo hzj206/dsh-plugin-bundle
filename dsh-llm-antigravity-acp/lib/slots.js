@@ -12,10 +12,10 @@ import { accountEnv } from './accounts.js';
  * @param layout - account layout the slot serves.
  * @returns the new slot.
  */
-export function newSlot(layout) {
+export function newSlot(layout, platform = process.platform) {
     return {
         layout,
-        env: accountEnv(layout),
+        env: accountEnv(layout, platform),
         preflight: undefined,
         preflightPromise: undefined,
         process: undefined,
@@ -26,6 +26,9 @@ export function newSlot(layout) {
         error: undefined,
         readyAt: 0,
         email: undefined,
+        hasRefreshToken: false,
+        verificationRequired: false,
+        verificationUrl: undefined,
         subscriptionTier: undefined,
         subscriptionName: undefined,
         availableModels: undefined,
@@ -40,12 +43,13 @@ export function newSlot(layout) {
  * environment), keeping the state that belongs to the account itself.
  * @param slot - slot to update in place.
  * @param layout - freshly resolved layout for the same account id.
+ * @param platform - host platform, injectable for tests.
  * @returns true when the environment overlay changed, so the caller can restart
  * a running ACP front that would otherwise keep the old one.
  */
-export function rebaseSlot(slot, layout) {
+export function rebaseSlot(slot, layout, platform = process.platform) {
     slot.layout = layout;
-    const nextEnv = accountEnv(layout);
+    const nextEnv = accountEnv(layout, platform);
     const envChanged = JSON.stringify(slot.env) !== JSON.stringify(nextEnv);
     slot.env = nextEnv;
     return envChanged;

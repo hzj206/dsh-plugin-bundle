@@ -2116,3 +2116,357 @@ test('QuotaPill asks about the model on screen and drops a late answer for the p
   assert.equal(textOf(findOne(view.tree, (n) => n.tag === 'button')), '周 46%', 'a stale answer never repaints the current model')
   view.unmount()
 })
+
+test('Windows AccountsPanel shows single-active toolbar, hot-switch button, snapshot backup, and credential import', async () => {
+  const calls = []
+  let activeId = 'default'
+  const makeStatus = () => ({
+    state: 'ready',
+    version: '1.2.3',
+    platform: 'win32',
+    activeAccountId: activeId,
+    contextWindow: 1_048_576,
+    configuredContextWindow: 0,
+    defaultEffort: 'high',
+    longDecodeContinuations: 3,
+    degradeAction: 'truncation',
+    engineMode: 'bridge',
+    models: [],
+    availableModels: [],
+    visibleModels: [],
+    accounts: [
+      {
+        id: 'default', label: 'This Mac', system: true, enabled: true, active: activeId === 'default',
+        hasRefreshToken: true, state: 'ready', sessions: 1, email: 'alice@example.com', subscriptionTier: 'PRO',
+        env: {}, home: '', contextWindow: 0, visibleModels: [], priority: 1, weight: 1, cooldowns: [],
+      },
+      {
+        id: 'acc-bob', label: 'Bob Ultra', system: false, enabled: true, active: activeId === 'acc-bob',
+        hasRefreshToken: true, state: 'idle', sessions: 0, email: 'bob@example.com', subscriptionTier: 'ULTRA',
+        env: {}, home: '', contextWindow: 0, visibleModels: [], priority: 1, weight: 1, cooldowns: [],
+      },
+    ],
+  })
+
+  const { registered, mount } = loadClientPlugin({
+    language: 'zh-CN',
+    remoteService: {
+      status: async () => makeStatus(),
+      accounts: async () => makeStatus().accounts,
+      switchAccount: async (req) => {
+        calls.push({ method: 'switchAccount', req })
+        activeId = req.accountId
+        return makeStatus()
+      },
+      snapshotAccount: async (req) => {
+        calls.push({ method: 'snapshotAccount', req })
+        return { accountId: 'default', email: 'alice@example.com', created: false, hasRefreshToken: true, status: makeStatus() }
+      },
+      importCredential: async (req) => {
+        calls.push({ method: 'importCredential', req })
+        return { accountId: 'acc-carol', email: 'carol@example.com', created: true, hasRefreshToken: true, status: makeStatus() }
+      },
+    },
+  })
+
+  const section = registered.get('settings.section')
+  const view = mount(section.Component, section.meta.inject())
+  await flush()
+
+  // Windows toolbar + Active badge on default + Switch button only on inactive Bob
+  assert.ok(findOne(view.tree, (n) => n.props && n.props['data-agy-win-toolbar'] === 'true'))
+  const defaultCard = findOne(view.tree, (n) => n.props && n.props['data-agy-account'] === 'default')
+  assert.equal(defaultCard.props['data-agy-active'], 'true')
+  assert.ok(findOne(defaultCard, (n) => n.props && n.props['data-agy-active-badge'] === 'true'))
+  assert.equal(findOne(defaultCard, (n) => n.props && n.props['data-agy-switch-btn'] === 'default'), null)
+
+  const switchBobBtn = findOne(view.tree, (n) => n.props && n.props['data-agy-switch-btn'] === 'acc-bob')
+  assert.ok(switchBobBtn, 'inactive signed-in Windows backup account exposes Switch button')
+  switchBobBtn.props.onClick()
+  await flush()
+  assert.equal(calls[0].method, 'switchAccount')
+  assert.equal(calls[0].req.accountId, 'acc-bob')
+  const bobCardAfter = findOne(view.tree, (n) => n.props && n.props['data-agy-account'] === 'acc-bob')
+  assert.equal(bobCardAfter.props['data-agy-active'], 'true')
+
+  // Snapshot current login
+  const snapshotBtn = findOne(view.tree, (n) => n.props && n.props['data-agy-snapshot-btn'] === 'true')
+  snapshotBtn.props.onClick()
+  await flush()
+  assert.equal(calls[1].method, 'snapshotAccount')
+
+  // Open import backup drawer and submit credential payload
+  const importToggle = findOne(view.tree, (n) => n.props && n.props['data-agy-import-toggle'] === 'true')
+  importToggle.props.onClick()
+  await flush()
+  const importBox = findOne(view.tree, (n) => n.props && n.props['data-agy-import-box'] === 'true')
+  assert.ok(importBox)
+  const textarea = findOne(importBox, (n) => n.tag === 'textarea')
+  textarea.props.onChange({ target: { value: 'C:\\backups\\carol.json' } })
+  await flush()
+  const submitBtn = findOne(view.tree, (n) => n.props && n.props['data-agy-import-submit'] === 'true')
+  submitBtn.props.onClick()
+  await flush()
+  assert.equal(calls[2].method, 'importCredential')
+  assert.equal(calls[2].req.content, 'C:\\backups\\carol.json')
+  assert.equal(findOne(view.tree, (n) => n.props && n.props['data-agy-import-box'] === 'true'), null, 'import box closes after success')
+  view.unmount()
+})
+
+test('AccountCard surfaces verification, ToS suspension, and downgrade banners with recheck and dismiss actions', async () => {
+  let verifyRequired = true
+  let hasDowngrade = true
+  const calls = []
+  const makeStatus = () => ({
+    state: 'ready',
+    version: '1.2.3',
+    platform: 'win32',
+    activeAccountId: 'acc-verify',
+    contextWindow: 1_048_576,
+    configuredContextWindow: 0,
+    defaultEffort: 'high',
+    longDecodeContinuations: 3,
+    degradeAction: 'truncation',
+    engineMode: 'bridge',
+    models: [],
+    availableModels: [],
+    visibleModels: [],
+    accounts: [
+      {
+        id: 'acc-verify', label: 'Verify Me', system: false, enabled: true, active: true,
+        state: 'ready', sessions: 0, email: 'verify@example.com', subscriptionTier: 'FREE',
+        verificationRequired: verifyRequired,
+        verificationUrl: 'https://accounts.google.com/verify-me',
+        downgradeAlert: hasDowngrade ? {
+          fromTier: 'PRO', toTier: 'FREE', fromModels: 5, toModels: 2,
+          detectedAt: '2026-11-22T00:00:00.000Z', acknowledged: false,
+        } : undefined,
+        tierHistory: [
+          { tier: 'PRO', modelCount: 5, at: '2026-11-20T00:00:00.000Z' },
+          { tier: 'FREE', modelCount: 2, at: '2026-11-22T00:00:00.000Z' },
+        ],
+        env: {}, home: '', contextWindow: 0, visibleModels: [], priority: 1, weight: 1, cooldowns: [],
+      },
+      {
+        id: 'acc-tos', label: 'Suspended One', system: false, enabled: true, active: false,
+        state: 'idle', sessions: 0, email: 'tos@example.com',
+        tosSuspended: true,
+        tosAppealUrl: 'https://forms.gle/hGzM9MEUv2azZsrb9',
+        env: {}, home: '', contextWindow: 0, visibleModels: [], priority: 1, weight: 1, cooldowns: [],
+      },
+    ],
+  })
+
+  const { registered, mount } = loadClientPlugin({
+    language: 'zh-CN',
+    remoteService: {
+      status: async () => makeStatus(),
+      accounts: async () => makeStatus().accounts,
+      recheckAccount: async (req) => {
+        calls.push({ method: 'recheckAccount', req })
+        if (req.accountId === 'acc-verify') verifyRequired = false
+        return { status: makeStatus(), quota: { status: 'ok', groups: [] } }
+      },
+      ackDowngrade: async (req) => {
+        calls.push({ method: 'ackDowngrade', req })
+        hasDowngrade = false
+        return makeStatus()
+      },
+    },
+  })
+
+  const section = registered.get('settings.section')
+  const view = mount(section.Component, section.meta.inject())
+  await flush()
+
+  // Verification link + Downgrade banner + ToS appeal link all render
+  const verifyLink = findOne(view.tree, (n) => n.props && n.props['data-agy-verify-link'] === 'acc-verify')
+  assert.equal(verifyLink.props.href, 'https://accounts.google.com/verify-me')
+  const tosLink = findOne(view.tree, (n) => n.props && n.props['data-agy-tos-appeal-link'] === 'acc-tos')
+  assert.equal(tosLink.props.href, 'https://forms.gle/hGzM9MEUv2azZsrb9')
+  assert.ok(findOne(view.tree, (n) => n.props && n.props['data-agy-health-banner'] === 'downgrade'))
+
+  // Click Recheck on verification banner -> clears verificationRequired
+  const recheckBtn = findOne(view.tree, (n) => n.props && n.props['data-agy-recheck-btn'] === 'acc-verify')
+  recheckBtn.props.onClick()
+  await flush()
+  assert.equal(calls[0].method, 'recheckAccount')
+  assert.equal(calls[0].req.accountId, 'acc-verify')
+  assert.equal(findOne(view.tree, (n) => n.props && n.props['data-agy-health-banner'] === 'verification'), null)
+
+  // Click Dismiss on downgrade banner -> hides banner
+  const ackBtn = findOne(view.tree, (n) => n.props && n.props['data-agy-ack-downgrade-btn'] === 'acc-verify')
+  ackBtn.props.onClick()
+  await flush()
+  assert.equal(calls[1].method, 'ackDowngrade')
+  assert.equal(calls[1].req.accountId, 'acc-verify')
+  assert.equal(findOne(view.tree, (n) => n.props && n.props['data-agy-health-banner'] === 'downgrade'), null)
+
+  // Open Edit modal -> tier history remains visible
+  const verifyCard = findOne(view.tree, (n) => n.props && n.props['data-agy-account'] === 'acc-verify')
+  const editBtn = findOne(verifyCard, (n) => n.tag === 'button' && textOf(n) === '编辑')
+  editBtn.props.onClick()
+  await flush()
+  const historyBlock = findOne(view.tree, (n) => n.props && n.props['data-agy-tier-history'] === 'acc-verify')
+  assert.ok(historyBlock)
+  assert.match(textOf(historyBlock), /PRO \(5\)/)
+  assert.match(textOf(historyBlock), /FREE \(2\)/)
+  view.unmount()
+})
+
+test('QuotaPill surfaces verification, ToS suspension, and downgrade alerts on pill and popover', async () => {
+  const { registered, mount } = loadClientPlugin({
+    language: 'zh-CN',
+    remoteService: {
+      quota: async () => ({
+        status: 'error',
+        model: 'gemini-4-argon',
+        accountId: 'default',
+        accountLabel: 'alice@example.com',
+        error: 'Verify your account to continue.',
+        verificationRequired: true,
+        verificationUrl: 'https://accounts.google.com/verify-pill',
+        downgradeAlert: {
+          fromTier: 'PRO', toTier: 'FREE', fromModels: 5, toModels: 2,
+          detectedAt: '2026-11-22T00:00:00.000Z', acknowledged: false,
+        },
+        groups: [],
+      }),
+    },
+  })
+
+  const slot = registered.get('conversation.input.right')
+  const view = mount(slot.Component, slot.meta.inject('session-verify'))
+  await flush()
+
+  const btn = findOne(view.tree, (n) => n.tag === 'button')
+  assert.ok(findOne(btn, (n) => n.props && n.props['data-agy-pill-verify'] === 'true'))
+  btn.props.onClick()
+  await flush()
+
+  const dialog = findOne(view.tree, (n) => n.props && n.props.role === 'dialog')
+  assert.ok(findOne(dialog, (n) => n.props && n.props['data-agy-popover-verify'] === 'true'))
+  assert.ok(findOne(dialog, (n) => n.props && n.props['data-agy-popover-downgrade'] === 'true'))
+  const link = findOne(dialog, (n) => n.tag === 'a')
+  assert.equal(link.props.href, 'https://accounts.google.com/verify-pill')
+  view.unmount()
+})
+
+test('QuotaPill renders per-session account switcher in popover, displays pill account chip, switches session in one click, and supports Auto unpin', async () => {
+  const calls = []
+  let pinned = {}
+  const makeAccounts = () => [
+    {
+      id: 'default', label: '主力Pro', system: true, enabled: true, state: 'ready',
+      email: 'alice@example.com', subscriptionTier: 'PRO', subscriptionName: 'Google AI Pro',
+      hasRefreshToken: true, quotaSummary: { gemini: 0.15, primary: 0.15 },
+    },
+    {
+      id: 'acc-bob', label: 'Ultra号', system: false, enabled: true, state: 'ready',
+      email: 'bob@example.com', subscriptionTier: 'ULTRA', subscriptionName: 'Google AI Ultra',
+      hasRefreshToken: true, quotaSummary: { gemini: 0.94, argon: 0.94, primary: 0.94 },
+    },
+  ]
+  const currentStatus = () => ({
+    state: 'ready',
+    platform: 'win32',
+    multiAccountMode: 'concurrent',
+    activeAccountId: 'default',
+    pinnedSessions: { ...pinned },
+    sessionAccounts: { 'sess-dev-1': pinned['sess-dev-1'] || 'default' },
+    accounts: makeAccounts(),
+  })
+  const { registered, mount } = loadClientPlugin({
+    language: 'zh-CN',
+    remoteService: {
+      status: () => currentStatus(),
+      quota: async (req) => {
+        const sid = req && req.sessionId
+        const accId = (sid && pinned[sid]) || 'default'
+        if (accId === 'acc-bob') {
+          return {
+            status: 'ok',
+            model: req.model,
+            accountId: 'acc-bob',
+            accountLabel: 'Ultra号',
+            subscriptionTier: 'ULTRA',
+            subscriptionName: 'Google AI Ultra',
+            updatedAt: new Date(FIXED_NOW).toISOString(),
+            groups: [{
+              kind: 'gemini', name: 'Gemini Models', description: '',
+              buckets: [{ id: 'weekly', name: 'Weekly', window: 'weekly', remainingFraction: 0.94, resetTime: isoAfterHours(60) }],
+            }],
+          }
+        }
+        return {
+          status: 'ok',
+          model: req.model,
+          accountId: 'default',
+          accountLabel: '主力Pro',
+          subscriptionTier: 'PRO',
+          subscriptionName: 'Google AI Pro',
+          updatedAt: new Date(FIXED_NOW).toISOString(),
+          groups: [{
+            kind: 'gemini', name: 'Gemini Models', description: '',
+            buckets: [{ id: 'weekly', name: 'Weekly', window: 'weekly', remainingFraction: 0.15, resetTime: isoAfterHours(24) }],
+          }],
+        }
+      },
+      switchAccount: async (req) => {
+        calls.push(req)
+        if (req.clear === true && req.sessionId) {
+          delete pinned[req.sessionId]
+        } else if (req.sessionId && req.accountId) {
+          pinned[req.sessionId] = req.accountId
+        }
+        return currentStatus()
+      },
+    },
+  })
+
+  const slot = registered.get('conversation.input.right')
+  const view = mount(slot.Component, slot.meta.inject('sess-dev-1'))
+  await flush()
+
+  // Collapsed pill displays the account chip in multi-account mode
+  const pillBtn = findOne(view.tree, (n) => n.tag === 'button')
+  const chip = findOne(pillBtn, (n) => n.props && n.props['data-agy-pill-account-chip'] === 'true')
+  assert.ok(chip, 'multi-account pill shows current session account chip')
+  assert.equal(textOf(chip), '主力Pro')
+
+  // Open popover and verify per-session account switcher lists both accounts with % and tiers
+  pillBtn.props.onClick()
+  await flush()
+  const switcher = findOne(view.tree, (n) => n.props && n.props['data-agy-session-switcher'] === 'true')
+  assert.ok(switcher, 'popover renders per-session account switcher')
+  const aliceRow = findOne(switcher, (n) => n.props && n.props['data-agy-pill-switch-account'] === 'default')
+  const bobRow = findOne(switcher, (n) => n.props && n.props['data-agy-pill-switch-account'] === 'acc-bob')
+  assert.equal(aliceRow.props['data-agy-pill-account-selected'], 'true')
+  assert.equal(bobRow.props['data-agy-pill-account-selected'], 'false')
+  assert.match(textOf(bobRow), /Ultra号.*ULTRA.*94%/)
+
+  // One-click switch this session to Bob
+  bobRow.props.onClick()
+  await flush()
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].accountId, 'acc-bob')
+  assert.equal(calls[0].sessionId, 'sess-dev-1')
+
+  // Pill chip and popover quota bars update immediately to Bob (94%) and show Auto unpin button
+  const chipAfter = findOne(view.tree, (n) => n.props && n.props['data-agy-pill-account-chip'] === 'true')
+  assert.equal(textOf(chipAfter), 'Ultra号')
+  const bobRowAfter = findOne(view.tree, (n) => n.props && n.props['data-agy-pill-switch-account'] === 'acc-bob')
+  assert.equal(bobRowAfter.props['data-agy-pill-account-selected'], 'true')
+  const unpinBtn = findOne(view.tree, (n) => n.props && n.props['data-agy-session-unpin'] === 'true')
+  assert.ok(unpinBtn, 'pinned session offers Auto unpin control')
+
+  // Click Auto to return session to automatic scheduling
+  unpinBtn.props.onClick()
+  await flush()
+  assert.equal(calls.length, 2)
+  assert.equal(calls[1].sessionId, 'sess-dev-1')
+  assert.equal(calls[1].clear, true)
+  assert.equal(findOne(view.tree, (n) => n.props && n.props['data-agy-session-unpin'] === 'true'), null)
+
+  view.unmount()
+})

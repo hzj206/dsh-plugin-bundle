@@ -11,7 +11,7 @@ import type { InvocationDescriptor, TypertCodec } from '@deepseek-ai/dsh-typert-
 import { SYSTEM_ACCOUNT_LABEL, type AccountStatus, type LoginResult, type LoginTicket } from './accounts.ts'
 import { asDegradeAction, asEffort, asEngineMode, type AccountProfile } from './config.ts'
 import type { QuotaSnapshot } from './quota.ts'
-import type { AntigravityRuntime, LiveOverrides, RuntimeStatus } from './runtime.ts'
+import type { AntigravityRuntime, CredentialActionResult, LiveOverrides, RuntimeStatus } from './runtime.ts'
 
 /** Package name used for Typert descriptor identities. */
 export const PACKAGE_NAME = 'dsh-llm-antigravity-acp'
@@ -94,6 +94,82 @@ function parseLoginCodeRequest(value: unknown): LoginCodeRequest {
   const accountId = parseAccountId(record.accountId, 'loginCode request')
   if (typeof record.code !== 'string' || record.code.trim().length === 0) throw new TypeError('Invalid antigravity loginCode request.code')
   return { accountId, code: record.code }
+}
+
+/** Request of `switchAccount`: target account plus optional DSH session scope. */
+export interface SwitchAccountRequest {
+  accountId?: string
+  sessionId?: string
+  clear?: boolean
+}
+
+function parseSwitchAccountRequest(value: unknown): SwitchAccountRequest {
+  const record = parseAccountRequest(value, 'switchAccount request')
+  const rawAccountId = record.accountId
+  const accountId = rawAccountId === undefined || rawAccountId === null
+    ? undefined
+    : (() => {
+        if (typeof rawAccountId !== 'string' || rawAccountId.trim().length === 0) {
+          throw new TypeError('Invalid antigravity switchAccount request.accountId')
+        }
+        return rawAccountId.trim()
+      })()
+  const rawSessionId = record.sessionId
+  const sessionId = rawSessionId === undefined || rawSessionId === null
+    ? undefined
+    : (() => {
+        if (typeof rawSessionId !== 'string' || rawSessionId.trim().length === 0) {
+          throw new TypeError('Invalid antigravity switchAccount request.sessionId')
+        }
+        return rawSessionId.trim()
+      })()
+  const clear = record.clear
+  if (clear !== undefined && typeof clear !== 'boolean') {
+    throw new TypeError('Invalid antigravity switchAccount request.clear')
+  }
+  if (clear === true) {
+    if (sessionId === undefined) throw new TypeError('Invalid antigravity switchAccount request.sessionId')
+    return { sessionId, clear: true }
+  }
+  if (accountId === undefined) throw new TypeError('Invalid antigravity switchAccount request.accountId')
+  return {
+    accountId,
+    ...(sessionId !== undefined ? { sessionId } : {}),
+  }
+}
+
+/** Optional request of `snapshotAccount`. */
+export interface SnapshotAccountRequest {
+  displayName?: string
+}
+
+/** Request of `importCredential`. */
+export interface ImportCredentialRequest {
+  displayName?: string
+  content: string
+}
+
+function parseSnapshotRequest(value: unknown): SnapshotAccountRequest | undefined {
+  if (value === undefined || value === null) return undefined
+  const record = parseAccountRequest(value, 'snapshotAccount request')
+  const displayName = record.displayName
+  if (displayName !== undefined && typeof displayName !== 'string') {
+    throw new TypeError('Invalid antigravity snapshotAccount request.displayName')
+  }
+  return displayName !== undefined ? { displayName } : {}
+}
+
+function parseImportCredentialRequest(value: unknown): ImportCredentialRequest {
+  const record = parseAccountRequest(value, 'importCredential request')
+  const content = record.content
+  if (typeof content !== 'string' || content.trim().length === 0) {
+    throw new TypeError('Invalid antigravity importCredential request.content')
+  }
+  const displayName = record.displayName
+  if (displayName !== undefined && typeof displayName !== 'string') {
+    throw new TypeError('Invalid antigravity importCredential request.displayName')
+  }
+  return { content, ...(displayName !== undefined ? { displayName } : {}) }
 }
 
 /**
@@ -299,9 +375,14 @@ const requestCodec = codec(`${PACKAGE_NAME}#QuotaRequest`, parseQuotaRequest)
 const configureCodec = codec(`${PACKAGE_NAME}#ConfigureRequest`, parseConfigureRequest)
 const accountsCodec = codec(`${PACKAGE_NAME}#Accounts`, parseArray('antigravity accounts'))
 const loginCodec = codec(`${PACKAGE_NAME}#LoginRequest`, parseLoginRequest)
+const switchAccountRequestCodec = codec(`${PACKAGE_NAME}#SwitchAccountRequest`, parseSwitchAccountRequest)
 const loginCodeRequestCodec = codec(`${PACKAGE_NAME}#LoginCodeRequest`, parseLoginCodeRequest)
 const ticketCodec = codec(`${PACKAGE_NAME}#LoginTicket`, parseObject('antigravity login ticket'))
 const loginResultCodec = codec(`${PACKAGE_NAME}#LoginResult`, parseObject('antigravity login result'))
+const snapshotRequestCodec = codec(`${PACKAGE_NAME}#SnapshotAccountRequest`, parseSnapshotRequest)
+const importCredentialRequestCodec = codec(`${PACKAGE_NAME}#ImportCredentialRequest`, parseImportCredentialRequest)
+const credentialResultCodec = codec(`${PACKAGE_NAME}#CredentialActionResult`, parseObject('antigravity credential result'))
+const recheckResultCodec = codec(`${PACKAGE_NAME}#RecheckResult`, parseObject('antigravity recheck result'))
 
 /** Invocation descriptors registered with the Host Gateway. */
 export const INVOCATIONS: readonly InvocationDescriptor[] = [
@@ -373,6 +454,51 @@ export const INVOCATIONS: readonly InvocationDescriptor[] = [
     service: SERVICE_NAME,
     namespace: SERVICE_NAME,
     method: 'cancelLogin',
+    invocation: { kind: 'direct' },
+    parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: false, codec: loginCodec }],
+    result: statusCodec,
+  },
+  {
+    id: `${PACKAGE_NAME}#${SERVICE_NAME}/switchAccount`,
+    service: SERVICE_NAME,
+    namespace: SERVICE_NAME,
+    method: 'switchAccount',
+    invocation: { kind: 'direct' },
+    parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: false, codec: switchAccountRequestCodec }],
+    result: statusCodec,
+  },
+  {
+    id: `${PACKAGE_NAME}#${SERVICE_NAME}/snapshotAccount`,
+    service: SERVICE_NAME,
+    namespace: SERVICE_NAME,
+    method: 'snapshotAccount',
+    invocation: { kind: 'direct' },
+    parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: true, codec: snapshotRequestCodec }],
+    result: credentialResultCodec,
+  },
+  {
+    id: `${PACKAGE_NAME}#${SERVICE_NAME}/importCredential`,
+    service: SERVICE_NAME,
+    namespace: SERVICE_NAME,
+    method: 'importCredential',
+    invocation: { kind: 'direct' },
+    parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: false, codec: importCredentialRequestCodec }],
+    result: credentialResultCodec,
+  },
+  {
+    id: `${PACKAGE_NAME}#${SERVICE_NAME}/recheckAccount`,
+    service: SERVICE_NAME,
+    namespace: SERVICE_NAME,
+    method: 'recheckAccount',
+    invocation: { kind: 'direct' },
+    parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: false, codec: loginCodec }],
+    result: recheckResultCodec,
+  },
+  {
+    id: `${PACKAGE_NAME}#${SERVICE_NAME}/ackDowngrade`,
+    service: SERVICE_NAME,
+    namespace: SERVICE_NAME,
+    method: 'ackDowngrade',
     invocation: { kind: 'direct' },
     parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: false, codec: loginCodec }],
     result: statusCodec,
@@ -471,7 +597,7 @@ export class AntigravityRemote extends TypertRemoteService {
    * @returns one row per account in configured order.
    */
   async accounts(): Promise<AccountStatus[]> {
-    await this.options.runtime.refreshAccountEmails()
+    await this.options.runtime.refreshAccountEmails(true)
     return this.options.runtime.accounts()
   }
 
@@ -502,6 +628,85 @@ export class AntigravityRemote extends TypertRemoteService {
   cancelLogin(request: LoginRequest): RuntimeStatus {
     this.options.runtime.cancelLogin(parseLoginRequest(request).accountId)
     return this.options.runtime.status()
+  }
+
+  /**
+   * Bind a specific DSH conversation/session to a chosen account (or clear its
+   * explicit pin), or update the global default account when `sessionId` is omitted.
+   * @param request - target account id and optional `sessionId` / `clear`.
+   * @returns updated status snapshot.
+   */
+  async switchAccount(request: SwitchAccountRequest): Promise<RuntimeStatus> {
+    const parsed = parseSwitchAccountRequest(request)
+    const wasDisabled = parsed.accountId !== undefined
+      && this.options.runtime.accounts().some(row => row.id === parsed.accountId && row.enabled === false)
+    const status = await this.options.runtime.switchActiveAccount(parsed.accountId, {
+      ...(parsed.sessionId !== undefined ? { sessionId: parsed.sessionId } : {}),
+      ...(parsed.clear === true ? { clear: true } : {}),
+    })
+    if (wasDisabled) {
+      await this.persistAccounts(status.accounts)
+    }
+    return status
+  }
+
+  /**
+   * Snapshot the current Windows Credential Manager login into a permanent slot
+   * and persist any newly added account row into profile settings.
+   * @param request - optional remark for a newly created slot.
+   * @returns saved account metadata and updated status.
+   */
+  async snapshotAccount(request?: SnapshotAccountRequest): Promise<CredentialActionResult> {
+    const parsed = parseSnapshotRequest(request)
+    const result = await this.options.runtime.snapshotCurrentAccount(parsed?.displayName)
+    await this.persistAccountsIfCreated(result)
+    return result
+  }
+
+  /**
+   * Import a permanent OAuth credential backup (JSON content or local file path)
+   * into an isolated account slot and persist the updated account list.
+   * @param request - credential backup payload or path, plus optional remark.
+   * @returns saved account metadata and updated status.
+   */
+  async importCredential(request: ImportCredentialRequest): Promise<CredentialActionResult> {
+    const parsed = parseImportCredentialRequest(request)
+    const result = await this.options.runtime.importAccountCredential(parsed)
+    await this.persistAccountsIfCreated(result)
+    return result
+  }
+
+  /**
+   * Recheck verification / ToS suspension status and live quota for one account.
+   * @param request - target account id.
+   * @returns updated status and quota snapshot.
+   */
+  recheckAccount(request: LoginRequest): Promise<{ status: RuntimeStatus; quota: QuotaSnapshot }> {
+    return this.options.runtime.recheckAccount(parseLoginRequest(request).accountId)
+  }
+
+  /**
+   * Dismiss an account's subscription downgrade banner while retaining tier history.
+   * @param request - target account id.
+   * @returns updated status snapshot.
+   */
+  ackDowngrade(request: LoginRequest): RuntimeStatus {
+    return this.options.runtime.acknowledgeDowngrade(parseLoginRequest(request).accountId)
+  }
+
+  private async persistAccountsIfCreated(result: CredentialActionResult): Promise<void> {
+    if (!result.created) return
+    await this.persistAccounts(result.status.accounts)
+  }
+
+  private async persistAccounts(rows: readonly AccountStatus[]): Promise<void> {
+    const settings = this.ctx.get('settings') as SettingsWriter | undefined
+    if (settings?.writable !== true || typeof settings.update !== 'function') return
+    try {
+      await settings.update(this.options.settingsNs, { accounts: storedAccounts(rows) })
+    } catch {
+      // Ephemeral/overlay settings may skip persistence; runtime state still applies.
+    }
   }
 }
 

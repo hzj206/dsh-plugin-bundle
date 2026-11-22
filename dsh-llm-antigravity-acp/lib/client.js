@@ -716,6 +716,11 @@ window.__ModuleLoader__.load({
       { id: `${PACKAGE}#${SERVICE}/login`, service: SERVICE, namespace: SERVICE, method: 'login', invocation: { kind: 'direct' }, parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: false, codec: codec('LoginRequest', anyObject) }], result: codec('LoginTicket', anyObject) },
       { id: `${PACKAGE}#${SERVICE}/loginCode`, service: SERVICE, namespace: SERVICE, method: 'loginCode', invocation: { kind: 'direct' }, parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: false, codec: codec('LoginCodeRequest', anyObject) }], result: codec('LoginResult', anyObject) },
       { id: `${PACKAGE}#${SERVICE}/cancelLogin`, service: SERVICE, namespace: SERVICE, method: 'cancelLogin', invocation: { kind: 'direct' }, parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: false, codec: codec('LoginRequest', anyObject) }], result: codec('Status', anyObject) },
+      { id: `${PACKAGE}#${SERVICE}/switchAccount`, service: SERVICE, namespace: SERVICE, method: 'switchAccount', invocation: { kind: 'direct' }, parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: false, codec: codec('SwitchAccountRequest', anyObject) }], result: codec('Status', anyObject) },
+      { id: `${PACKAGE}#${SERVICE}/snapshotAccount`, service: SERVICE, namespace: SERVICE, method: 'snapshotAccount', invocation: { kind: 'direct' }, parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: true, codec: codec('SnapshotAccountRequest', optionalObject) }], result: codec('CredentialActionResult', anyObject) },
+      { id: `${PACKAGE}#${SERVICE}/importCredential`, service: SERVICE, namespace: SERVICE, method: 'importCredential', invocation: { kind: 'direct' }, parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: false, codec: codec('ImportCredentialRequest', anyObject) }], result: codec('CredentialActionResult', anyObject) },
+      { id: `${PACKAGE}#${SERVICE}/recheckAccount`, service: SERVICE, namespace: SERVICE, method: 'recheckAccount', invocation: { kind: 'direct' }, parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: false, codec: codec('LoginRequest', anyObject) }], result: codec('RecheckResult', anyObject) },
+      { id: `${PACKAGE}#${SERVICE}/ackDowngrade`, service: SERVICE, namespace: SERVICE, method: 'ackDowngrade', invocation: { kind: 'direct' }, parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: false, codec: codec('LoginRequest', anyObject) }], result: codec('Status', anyObject) },
     ]
 
     // A Typert call envelope is `{ ok: true, value }` or `{ ok: false, error:
@@ -763,6 +768,11 @@ window.__ModuleLoader__.load({
         login: (request) => call('login', request),
         loginCode: (request) => call('loginCode', request),
         cancelLogin: (request) => call('cancelLogin', request),
+        switchAccount: (request) => call('switchAccount', request),
+        snapshotAccount: (request) => call('snapshotAccount', request && typeof request === 'object' ? request : undefined),
+        importCredential: (request) => call('importCredential', request),
+        recheckAccount: (request) => call('recheckAccount', request),
+        ackDowngrade: (request) => call('ackDowngrade', request),
       }
     }
 
@@ -979,6 +989,32 @@ window.__ModuleLoader__.load({
       '.dsh-agy-dot{display:inline-block;width:7px;height:7px;border-radius:999px;flex:0 0 auto}',
       '.dsh-agy-badge{display:inline-flex;align-items:center;gap:6px;padding:2px 9px;border-radius:999px;font-size:11px;line-height:18px;font-weight:500;white-space:nowrap;background:var(--dsw-alias-bg-module-platform, color-mix(in srgb, currentColor 6%, transparent));color:var(--dsw-alias-label-primary)}',
       '.dsh-agy-badge-system{padding:1px 7px;font-size:11px;background:color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 12%, transparent);color:var(--dsw-alias-state-business-primary, #4176e6)}',
+      '.dsh-agy-badge-active{padding:1px 7px;font-size:11px;background:color-mix(in srgb, #2e9e6a 14%, transparent);color:#2e9e6a}',
+      '.dsh-agy-badge-warn{padding:1px 7px;font-size:11px;background:color-mix(in srgb, #e0a800 16%, transparent);color:var(--dsw-alias-state-warning-primary, #b45309)}',
+      '.dsh-agy-badge-danger{padding:1px 7px;font-size:11px;background:color-mix(in srgb, #d9534f 14%, transparent);color:#d9534f}',
+      '.dsh-agy-account-card[data-agy-active="true"]{border-color:color-mix(in srgb, #2e9e6a 42%, transparent)}',
+      '.dsh-agy-win-toolbar{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border-radius:12px;background:var(--dsw-alias-bg-module-platform, color-mix(in srgb, currentColor 4%, transparent));border:0.5px solid var(--dsw-alias-border-l2, color-mix(in srgb, currentColor 10%, transparent))}',
+      '.dsh-agy-win-toolbar-note{font-size:12px;line-height:17px;color:var(--dsw-alias-label-secondary, var(--dsw-alias-label-tertiary, currentColor));margin:0}',
+      '.dsh-agy-win-toolbar-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px}',
+      '.dsh-agy-import-box{display:flex;flex-direction:column;gap:8px;padding:12px;border-radius:12px;background:var(--dsw-alias-bg-module-platform, color-mix(in srgb, currentColor 4%, transparent));border:0.5px solid var(--dsw-alias-settings-card-stroke, color-mix(in srgb, currentColor 14%, transparent))}',
+      '.dsh-agy-textarea{box-sizing:border-box;width:100%;min-height:76px;resize:vertical;font:inherit;font-size:12px;line-height:18px;padding:6px 8px;border-radius:6px;border:0.5px solid var(--dsw-alias-border-l4, color-mix(in srgb, currentColor 18%, transparent));background:var(--dsw-alias-bg-layer-3, transparent);color:var(--dsw-alias-label-primary);outline:none}',
+      '.dsh-agy-textarea:focus-visible{border-color:var(--dsw-alias-state-business-primary, #4176e6);box-shadow:0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 18%, transparent)}',
+      '.dsh-agy-health-banner{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px 10px;padding:8px 10px;border-radius:10px;font-size:12px;line-height:17px;white-space:normal}',
+      '.dsh-agy-health-banner-warn{background:color-mix(in srgb, #e0a800 11%, transparent);border:0.5px solid color-mix(in srgb, #e0a800 32%, transparent);color:var(--dsw-alias-state-warning-primary, #b45309)}',
+      '.dsh-agy-health-banner-danger{background:color-mix(in srgb, #d9534f 11%, transparent);border:0.5px solid color-mix(in srgb, #d9534f 34%, transparent);color:#d9534f}',
+      '.dsh-agy-health-banner-text{flex:1 1 220px;min-width:0}',
+      '.dsh-agy-health-banner-actions{display:inline-flex;align-items:center;flex-wrap:wrap;gap:6px;flex:0 0 auto}',
+      '.dsh-agy-health-link{display:inline-flex;align-items:center;padding:3px 9px;border-radius:6px;font-size:11px;line-height:18px;font-weight:500;text-decoration:none;border:0.5px solid currentColor;color:inherit;background:transparent}',
+      '.dsh-agy-health-link:hover{background:color-mix(in srgb, currentColor 10%, transparent)}',
+      '.dsh-agy-tier-history{display:flex;flex-direction:column;gap:4px;padding:8px 10px;border-radius:8px;background:var(--dsw-alias-bg-module-platform, color-mix(in srgb, currentColor 4%, transparent));font-size:11.5px;color:var(--dsw-alias-label-secondary, currentColor)}',
+      '.dsh-agy-tier-history-title{font-weight:500;color:var(--dsw-alias-label-primary)}',
+      '.dsh-agy-tier-history-items{display:flex;flex-wrap:wrap;gap:4px 8px;font-variant-numeric:tabular-nums}',
+      '.dsh-agy-pill-alert{display:inline-flex;align-items:center;gap:4px;padding:1px 6px;margin-left:2px;border-radius:999px;font-size:11px;line-height:16px;font-weight:500}',
+      '.dsh-agy-pill-alert-warn{background:color-mix(in srgb, #e0a800 18%, transparent);color:var(--dsw-alias-state-warning-primary, #b45309)}',
+      '.dsh-agy-pill-alert-danger{background:color-mix(in srgb, #d9534f 16%, transparent);color:#d9534f}',
+      '.dsh-agy-popover-alert{margin-bottom:8px;padding:8px 10px;border-radius:8px;font-size:11.5px;line-height:16px;white-space:normal;display:flex;flex-direction:column;gap:6px}',
+      '.dsh-agy-popover-alert-warn{background:color-mix(in srgb, #e0a800 10%, transparent);border:1px solid color-mix(in srgb, #e0a800 30%, transparent);color:var(--dsw-alias-state-warning-primary, #b45309)}',
+      '.dsh-agy-popover-alert-danger{background:color-mix(in srgb, #d9534f 10%, transparent);border:1px solid color-mix(in srgb, #d9534f 32%, transparent);color:#d9534f}',
       '.dsh-agy-tier{display:inline-flex;align-items:center;padding:1px 8px;border-radius:999px;font-size:11px;line-height:18px;font-weight:500;letter-spacing:0.02em;white-space:nowrap;background:var(--dsw-alias-bg-module-platform, color-mix(in srgb, currentColor 7%, transparent));color:var(--dsw-alias-label-secondary, var(--dsw-alias-label-primary))}',
       '.dsh-agy-tier-ultra{background:color-mix(in srgb, #7c3aed 13%, transparent);color:#7c3aed}',
       '.dsh-agy-tier-pro{background:color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 13%, transparent);color:var(--dsw-alias-state-business-primary, #4176e6)}',
@@ -1069,6 +1105,25 @@ window.__ModuleLoader__.load({
       '.dsh-agy-btn-dialog{height:34px;padding:0 14px}',
       '.dsh-agy-btn-dialog-start{height:34px;padding:0 12px;margin-right:auto}',
       '.dsh-agy-btn-settings{padding:3px 12px}',
+      // Composer quota pill multi-account chip & per-session account switcher inside popover.
+      '.dsh-agy-pill-acc-chip{max-width:86px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;opacity:0.72;padding-left:6px;margin-left:2px;border-left:1px solid color-mix(in srgb, currentColor 18%, transparent)}',
+      '.dsh-agy-session-switcher{margin-top:9px;padding-top:8px;border-top:1px solid color-mix(in srgb, currentColor 10%, transparent);display:flex;flex-direction:column;gap:6px;white-space:normal}',
+      '.dsh-agy-session-switcher-head{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11px}',
+      '.dsh-agy-session-switcher-title{font-weight:600;opacity:0.74}',
+      '.dsh-agy-session-unpin{border:none;background:transparent;padding:0;font:inherit;font-size:11px;color:var(--dsw-alias-label-link, #2f6feb);cursor:pointer;opacity:0.86}',
+      '.dsh-agy-session-unpin:hover{text-decoration:underline;opacity:1}',
+      '.dsh-agy-session-acc-list{display:flex;flex-direction:column;gap:3px;max-height:196px;overflow-y:auto}',
+      '.dsh-agy-session-acc-row{box-sizing:border-box;display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;padding:5px 8px;border-radius:7px;border:1px solid transparent;background:transparent;color:inherit;font:inherit;font-size:11.5px;line-height:1.35;text-align:left;cursor:pointer;transition:background 120ms ease,border-color 120ms ease}',
+      '.dsh-agy-session-acc-row:hover:not(:disabled){background:color-mix(in srgb, currentColor 7%, transparent)}',
+      '.dsh-agy-session-acc-row[data-agy-pill-account-selected="true"]{background:color-mix(in srgb, #2e9e6a 11%, transparent);border-color:color-mix(in srgb, #2e9e6a 38%, transparent);font-weight:500}',
+      '.dsh-agy-session-acc-row:disabled{opacity:0.46;cursor:not-allowed}',
+      '.dsh-agy-session-acc-left{display:inline-flex;align-items:center;gap:6px;min-width:0;flex:1 1 auto}',
+      '.dsh-agy-session-acc-dot{flex:0 0 auto;width:12px;text-align:center;font-size:11px;color:#2e9e6a;font-weight:700}',
+      '.dsh-agy-session-acc-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.dsh-agy-session-acc-right{display:inline-flex;align-items:center;gap:5px;flex:0 0 auto;font-size:11px;font-variant-numeric:tabular-nums}',
+      '.dsh-agy-session-tier{padding:0 5px;border-radius:4px;font-size:10px;font-weight:600;letter-spacing:0.02em;background:color-mix(in srgb, currentColor 8%, transparent);opacity:0.82}',
+      '.dsh-agy-session-tier-ultra{color:#7c3aed;background:color-mix(in srgb, #7c3aed 14%, transparent);opacity:1}',
+      '.dsh-agy-session-tier-pro{color:#2563eb;background:color-mix(in srgb, #2563eb 13%, transparent);opacity:1}',
     ].join('\n') + '\n' + MS.CSS
     const STYLE_ID = 'antigravity-acp-rows-style'
     function ensureStyles() {
@@ -1233,6 +1288,9 @@ window.__ModuleLoader__.load({
     const ADD_PENDING = '__draft__'
     /** Pending marker for the "use this Mac's login" row, which owns no key yet either. */
     const USE_SYSTEM_PENDING = '__system__'
+    const SNAPSHOT_PENDING = '__snapshot__'
+    const IMPORT_PENDING = '__import__'
+    const DEFAULT_TOS_APPEAL_URL = 'https://forms.gle/hGzM9MEUv2azZsrb9'
     const PROXY_ENV_NAMES = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'NO_PROXY', 'no_proxy']
     const LOOPBACK_NO_PROXY = '127.0.0.1,localhost,::1'
 
@@ -1320,7 +1378,14 @@ window.__ModuleLoader__.load({
         variant === 'primary' ? 'dsh-agy-btn-primary' : variant === 'danger' ? 'dsh-agy-btn-danger' : '',
         props.className || '',
       ].filter(Boolean).join(' ')
+      const extra = {}
+      for (const [k, v] of Object.entries(props)) {
+        if ((k.startsWith('data-') || k === 'title' || k === 'aria-label' || k === 'aria-expanded') && v !== undefined) {
+          extra[k] = v
+        }
+      }
       return h('button', {
+        ...extra,
         type: 'button',
         className,
         disabled,
@@ -1559,6 +1624,11 @@ window.__ModuleLoader__.load({
       const row = props.row
       const id = row.id
       const system = row.system === true
+      const isWindows = props.isWindows === true
+      const isActive = row.active === true
+      const hasVerify = row.verificationRequired === true
+      const isTosSuspended = row.tosSuspended === true
+      const downgradeAlert = row.downgradeAlert && row.downgradeAlert.acknowledged !== true ? row.downgradeAlert : null
       const busy = props.busy === true
       const running = (kind) => props.runningKind === kind
       const ticket = props.ticket
@@ -1577,6 +1647,7 @@ window.__ModuleLoader__.load({
       return h('div', {
         className: 'dsh-agy-account-card',
         'data-agy-account': id,
+        ...(isActive ? { 'data-agy-active': 'true' } : {}),
         style: row.enabled === false ? { opacity: 0.68 } : undefined,
       },
         // Main row: avatar + two-line identity on the left, actions in ONE
@@ -1608,19 +1679,35 @@ window.__ModuleLoader__.load({
                     onClick: () => props.onBeginRename(),
                   }, accountTitle(row)),
                 system ? h('span', { className: 'dsh-agy-badge dsh-agy-badge-system' }, t('Default', '默认')) : null,
+                isActive ? h('span', { className: 'dsh-agy-badge dsh-agy-badge-active', 'data-agy-active-badge': 'true' }, t('Preferred', '新会话默认')) : null,
                 tierBadge(row.subscriptionTier || (props.quota && props.quota.subscriptionTier), row.subscriptionName || (props.quota && props.quota.subscriptionName)),
+                isTosSuspended ? h('span', { className: 'dsh-agy-badge dsh-agy-badge-danger', 'data-agy-tos-badge': 'true' }, t('Suspended', '已封禁')) : null,
+                !isTosSuspended && hasVerify ? h('span', { className: 'dsh-agy-badge dsh-agy-badge-warn', 'data-agy-verify-badge': 'true' }, t('Verify', '需验证')) : null,
+                downgradeAlert ? h('span', { className: 'dsh-agy-badge dsh-agy-badge-warn', 'data-agy-downgrade-badge': 'true' }, `${downgradeAlert.fromTier}→${downgradeAlert.toTier}`) : null,
                 schedBadge(row)),
               h('div', { className: 'dsh-agy-account-sub' },
                 (!system && !remarkOf(row) && signedIn(row))
                   ? null
                   : h('span', { className: 'dsh-agy-account-email' }, row.email || t('Not signed in', '未登录')),
                 h('span', { className: 'dsh-agy-account-sessions' }, t(`${Number(row.sessions) || 0} sessions`, `${Number(row.sessions) || 0} 会话`)),
+                isWindows && row.hasRefreshToken === true
+                  ? h('span', { 'data-agy-refresh-token': 'true' }, t('Permanent token', '永久凭据'))
+                  : null,
                 Array.isArray(row.visibleModels) && row.visibleModels.length > 0
                   ? h('span', {}, t(`Routes ${row.visibleModels.length} models`, `限 ${row.visibleModels.length} 个模型`))
                   : (signedIn(row)
                     ? h('span', {}, t('All global models', '跟随全局模型'))
                     : null)))),
           h('div', { className: 'dsh-agy-account-actions' },
+            isWindows && !isActive && (signedIn(row) || row.hasRefreshToken === true) && typeof props.onSwitchAccount === 'function'
+              ? h(SmallButton, {
+                variant: 'primary',
+                className: 'dsh-agy-btn-row',
+                'data-agy-switch-btn': id,
+                disabled: busy,
+                onClick: () => props.onSwitchAccount(),
+              }, running('switch') ? '…' : t('Set default', '设为默认'))
+              : null,
             (system || signedIn(row)) ? h('button', {
               type: 'button',
               className: 'dsh-agy-btn dsh-agy-btn-row',
@@ -1633,6 +1720,47 @@ window.__ModuleLoader__.load({
               ? h(SmallButton, { className: 'dsh-agy-btn-row', disabled: busy, onClick: () => props.onEdit() }, running('save') ? '…' : t('Edit', '编辑'))
               : h(SmallButton, { className: 'dsh-agy-btn-row', disabled: busy, onClick: () => props.onLogin() }, running('login') ? '…' : t('Sign in', '登录')),
             removeControl)),
+        isTosSuspended ? h('div', { role: 'alert', className: 'dsh-agy-health-banner dsh-agy-health-banner-danger', 'data-agy-health-banner': 'tos' },
+          h('span', { className: 'dsh-agy-health-banner-text' },
+            t('This account is suspended for Terms of Service violation. Switch to another account or submit an appeal.', '该账号因违反服务条款（ToS）已被停用，请切换其他账号或提交申诉。')),
+          h('span', { className: 'dsh-agy-health-banner-actions' },
+            h('a', {
+              href: row.tosAppealUrl || DEFAULT_TOS_APPEAL_URL,
+              target: '_blank',
+              rel: 'noreferrer',
+              className: 'dsh-agy-health-link',
+              'data-agy-tos-appeal-link': id,
+            }, t('Submit appeal', '提交申诉')),
+            typeof props.onRecheck === 'function'
+              ? h(SmallButton, { className: 'dsh-agy-btn-mini', 'data-agy-recheck-btn': id, disabled: busy, onClick: () => props.onRecheck() }, running('recheck') ? '…' : t('Recheck', '重新检测'))
+              : null)) : null,
+        hasVerify ? h('div', { role: 'alert', className: 'dsh-agy-health-banner dsh-agy-health-banner-warn', 'data-agy-health-banner': 'verification' },
+          h('span', { className: 'dsh-agy-health-banner-text' },
+            t('Google requires browser verification before this account can continue.', 'Google 要求在浏览器完成账号验证后才能继续使用。')),
+          h('span', { className: 'dsh-agy-health-banner-actions' },
+            row.verificationUrl ? h('a', {
+              href: row.verificationUrl,
+              target: '_blank',
+              rel: 'noreferrer',
+              className: 'dsh-agy-health-link',
+              'data-agy-verify-link': id,
+            }, t('Verify account', '前往验证')) : null,
+            typeof props.onRecheck === 'function'
+              ? h(SmallButton, { className: 'dsh-agy-btn-mini', 'data-agy-recheck-btn': id, disabled: busy, onClick: () => props.onRecheck() }, running('recheck') ? '…' : t('Recheck', '已验证，重新检测'))
+              : null)) : null,
+        downgradeAlert ? h('div', { role: 'status', className: 'dsh-agy-health-banner dsh-agy-health-banner-warn', 'data-agy-health-banner': 'downgrade' },
+          h('span', { className: 'dsh-agy-health-banner-text' },
+            t(
+              `Subscription downgraded: ${downgradeAlert.fromTier} → ${downgradeAlert.toTier} (models ${downgradeAlert.fromModels} → ${downgradeAlert.toModels}).`,
+              `订阅已降级：${downgradeAlert.fromTier} → ${downgradeAlert.toTier}（可用模型 ${downgradeAlert.fromModels} → ${downgradeAlert.toModels}）。`,
+            )),
+          h('span', { className: 'dsh-agy-health-banner-actions' },
+            typeof props.onRecheck === 'function'
+              ? h(SmallButton, { className: 'dsh-agy-btn-mini', disabled: busy, onClick: () => props.onRecheck() }, running('recheck') ? '…' : t('Recheck', '重新检测'))
+              : null,
+            typeof props.onAckDowngrade === 'function'
+              ? h(SmallButton, { className: 'dsh-agy-btn-mini', 'data-agy-ack-downgrade-btn': id, disabled: busy, onClick: () => props.onAckDowngrade() }, running('ack-downgrade') ? '…' : t('Dismiss', '知道了'))
+              : null)) : null,
         props.quotaOpen ? h(AccountQuotaDrawer, {
           row,
           quota: props.quota,
@@ -1836,6 +1964,13 @@ window.__ModuleLoader__.load({
           h('span', {}, t(`Input ${tokens(usage.inputTokens)}`, `输入 ${tokens(usage.inputTokens)}`)),
           h('span', {}, t(`Output ${tokens(usage.outputTokens)}`, `输出 ${tokens(usage.outputTokens)}`)),
           h('span', {}, t(`Total ${tokens(usage.totalTokens)} this run`, `本次运行合计 ${tokens(usage.totalTokens)}`))),
+        Array.isArray(row.tierHistory) && row.tierHistory.length > 0
+          ? h('div', { className: 'dsh-agy-tier-history', 'data-agy-tier-history': row.id },
+            h('span', { className: 'dsh-agy-tier-history-title' }, t('Tier history', '订阅变化记录')),
+            h('div', { className: 'dsh-agy-tier-history-items' },
+              ...row.tierHistory.slice(-5).map((entry, idx) => h('span', { key: `${entry.at || idx}-${idx}` },
+                `${entry.tier}${Number.isFinite(entry.modelCount) ? ` (${entry.modelCount})` : ''}${typeof entry.at === 'string' ? ` · ${entry.at.slice(0, 10)}` : ''}`))))
+          : null,
         props.error ? h('div', { role: 'alert', className: 'dsh-agy-row-alert' }, props.error) : null))
     }
 
@@ -1863,10 +1998,15 @@ window.__ModuleLoader__.load({
       // list over this Mac's own login.
       const listLoaded = accountsLoaded(props.accounts)
       const rows = Array.isArray(props.accounts) ? props.accounts : []
+      const isWindows = props.platform === 'win32' || rows.some((entry) => entry !== null && typeof entry === 'object' && typeof entry.active === 'boolean')
       const [draftRemark, setDraftRemark] = React.useState('')
       const [draftError, setDraftError] = React.useState(null)
       const [pending, setPending] = React.useState(null)
       const [panelError, setPanelError] = React.useState(null)
+      const [panelNotice, setPanelNotice] = React.useState(null)
+      const [importOpen, setImportOpen] = React.useState(false)
+      const [importRemark, setImportRemark] = React.useState('')
+      const [importContent, setImportContent] = React.useState('')
       const [tickets, setTickets] = React.useState({})
       const [codes, setCodes] = React.useState({})
       const [rowErrors, setRowErrors] = React.useState({})
@@ -2072,7 +2212,10 @@ window.__ModuleLoader__.load({
         remember(setQuotaLoading, row.id, true)
         props.client.quota({ accountId: row.id, force: force === true }).then((snapshot) => {
           setQuotas((prev) => ({ ...prev, [row.id]: snapshot }))
-          if (snapshot && snapshot.status === 'ok' && (snapshot.subscriptionTier || snapshot.availableModels)) {
+          if (snapshot && ((snapshot.status === 'ok' && (snapshot.subscriptionTier || snapshot.availableModels))
+            || snapshot.verificationRequired === true
+            || snapshot.tosSuspended === true
+            || snapshot.downgradeAlert !== undefined)) {
             props.client.status().then((next) => {
               if (typeof props.onStatus === 'function') props.onStatus(next)
             }).catch(() => undefined)
@@ -2128,6 +2271,121 @@ window.__ModuleLoader__.load({
         if (saved) setEditorId(null)
       }
 
+      const switchAccount = async (row) => {
+        if (typeof props.client.switchAccount !== 'function') return
+        setPending({ id: row.id, kind: 'switch' })
+        setPanelError(null)
+        setPanelNotice(null)
+        remember(setRowErrors, row.id, null)
+        remember(setRowNotices, row.id, null)
+        try {
+          const status = await props.client.switchAccount({ accountId: row.id })
+          if (typeof props.onStatus === 'function' && status !== null && typeof status === 'object') props.onStatus(status)
+          setQuotas({})
+          remember(setRowNotices, row.id, t('Switched — this account is now active', '已切换为当前生效账号（无需重启 DSH）'))
+        } catch (error) {
+          remember(setRowErrors, row.id, messageOf(error))
+        } finally {
+          setPending(null)
+        }
+      }
+
+      const snapshotCurrent = async () => {
+        if (typeof props.client.snapshotAccount !== 'function') return
+        setPending({ id: SNAPSHOT_PENDING, kind: 'snapshot' })
+        setPanelError(null)
+        setPanelNotice(null)
+        try {
+          const remark = cleanRemark(draftRemark)
+          const result = await props.client.snapshotAccount(remark.length > 0 ? { displayName: remark } : undefined)
+          if (result && result.status && typeof props.onStatus === 'function') props.onStatus(result.status)
+          setDraftRemark('')
+          setPanelNotice(t(
+            `Saved permanent credential for ${result && result.email ? result.email : 'current account'}`,
+            `已备份当前登录账号的永久凭据：${result && result.email ? result.email : '当前账号'}`,
+          ))
+        } catch (error) {
+          setPanelError(messageOf(error))
+        } finally {
+          setPending(null)
+        }
+      }
+
+      const submitImport = async () => {
+        if (typeof props.client.importCredential !== 'function') return
+        const content = importContent.trim()
+        if (content.length === 0) {
+          setPanelError(t('Paste credential JSON or a local backup file path first', '请先粘贴凭据 JSON 或填入本机备份文件路径'))
+          return
+        }
+        const remark = cleanRemark(importRemark)
+        if ([...remark].length > REMARK_LIMIT) {
+          setPanelError(t(`Use at most ${REMARK_LIMIT} characters`, `备注最多 ${REMARK_LIMIT} 个字符`))
+          return
+        }
+        setPending({ id: IMPORT_PENDING, kind: 'import' })
+        setPanelError(null)
+        setPanelNotice(null)
+        try {
+          const result = await props.client.importCredential({
+            content,
+            ...(remark.length > 0 ? { displayName: remark } : {}),
+          })
+          if (result && result.status && typeof props.onStatus === 'function') props.onStatus(result.status)
+          setImportContent('')
+          setImportRemark('')
+          setImportOpen(false)
+          setPanelNotice(t(
+            `Imported permanent credential for ${result && result.email ? result.email : 'account'}`,
+            `已导入账号永久凭据：${result && result.email ? result.email : '账号'}`,
+          ))
+        } catch (error) {
+          setPanelError(messageOf(error))
+        } finally {
+          setPending(null)
+        }
+      }
+
+      const recheckAccount = async (row) => {
+        if (typeof props.client.recheckAccount !== 'function') return
+        setPending({ id: row.id, kind: 'recheck' })
+        remember(setRowErrors, row.id, null)
+        remember(setRowNotices, row.id, null)
+        try {
+          const result = await props.client.recheckAccount({ accountId: row.id })
+          if (result && result.status && typeof props.onStatus === 'function') props.onStatus(result.status)
+          if (result && result.quota) {
+            setQuotas((prev) => ({ ...prev, [row.id]: result.quota }))
+          }
+          const q = result && result.quota
+          if (q && q.tosSuspended === true) {
+            remember(setRowErrors, row.id, t('Account is still suspended for ToS violation', '该账号仍处于服务条款（ToS）停用状态'))
+          } else if (q && q.verificationRequired === true) {
+            remember(setRowErrors, row.id, t('Verification is still required — complete it in your browser first', '仍需完成浏览器验证，请先点击「前往验证」'))
+          } else {
+            remember(setRowNotices, row.id, t('Recheck passed — account is healthy', '重新检测通过，账号状态正常'))
+          }
+        } catch (error) {
+          remember(setRowErrors, row.id, messageOf(error))
+        } finally {
+          setPending(null)
+        }
+      }
+
+      const ackDowngrade = async (row) => {
+        if (typeof props.client.ackDowngrade !== 'function') return
+        setPending({ id: row.id, kind: 'ack-downgrade' })
+        remember(setRowErrors, row.id, null)
+        try {
+          const status = await props.client.ackDowngrade({ accountId: row.id })
+          if (typeof props.onStatus === 'function' && status !== null && typeof status === 'object') props.onStatus(status)
+        } catch (error) {
+          remember(setRowErrors, row.id, messageOf(error))
+        } finally {
+          setPending(null)
+        }
+      }
+
       // Hydrate keychain emails on mount and auto-detect external terminal sign-ins while any ticket is open.
       const openTicketIds = Object.keys(tickets).filter((key) => tickets[key] !== null && tickets[key] !== undefined).join(',')
       React.useEffect(() => {
@@ -2173,9 +2431,70 @@ window.__ModuleLoader__.load({
         h('div', { className: 'dsh-agy-accounts-head' },
           h('span', { className: 'dsh-agy-accounts-title' }, t('Accounts', '账号')),
           h('span', { className: 'dsh-agy-count' }, listLoaded ? t(`${rows.length} configured`, `共 ${rows.length} 个`) : '—')),
+        isWindows && listLoaded ? h('div', { className: 'dsh-agy-win-toolbar', 'data-agy-win-toolbar': 'true' },
+          h('p', { className: 'dsh-agy-win-toolbar-note' },
+            t(
+              'Windows concurrent multi-account: each added or imported account runs in its own isolated credential file. Switch accounts per conversation from the Quota panel beside the composer, or back up / import credentials here.',
+              'Windows 多账号并发隔离：每个新增或导入的账号均使用独立凭据文件并行运行，互不干扰。可在输入框右侧「额度」面板按会话一键切换账号，也可在此备份本机登录或导入凭据。',
+            )),
+          h('div', { className: 'dsh-agy-win-toolbar-actions' },
+            typeof props.client.snapshotAccount === 'function'
+              ? h(SmallButton, {
+                className: 'dsh-agy-btn-row',
+                'data-agy-snapshot-btn': 'true',
+                disabled: busy,
+                onClick: () => void snapshotCurrent(),
+              }, running(SNAPSHOT_PENDING, 'snapshot') ? '…' : t('Backup current login', '备份当前登录'))
+              : null,
+            typeof props.client.importCredential === 'function'
+              ? h(SmallButton, {
+                className: 'dsh-agy-btn-row',
+                'data-agy-import-toggle': 'true',
+                'aria-expanded': importOpen,
+                disabled: busy,
+                onClick: () => { setImportOpen(!importOpen); setPanelError(null) },
+              }, importOpen ? t('Hide import', '收起导入') : t('Import backup', '导入凭据备份'))
+              : null)) : null,
+        importOpen ? h('div', { className: 'dsh-agy-import-box', 'data-agy-import-box': 'true' },
+          h('input', {
+            type: 'text',
+            className: 'dsh-agy-input',
+            value: importRemark,
+            placeholder: t('Remark (optional, defaults to email prefix)', '账号备注（可选，留空自动使用邮箱前缀）'),
+            'aria-label': t('Import remark', '导入账号备注'),
+            disabled: busy,
+            onChange: (e) => setImportRemark(e.target.value ?? ''),
+            style: { height: 34 },
+          }),
+          h('textarea', {
+            className: 'dsh-agy-textarea',
+            value: importContent,
+            placeholder: t(
+              'Paste OAuth JSON, agy_cred.ps1 backup JSON, or an absolute local backup file path',
+              '粘贴 OAuth JSON、agy_cred.ps1 备份 JSON，或直接填入本机备份文件绝对路径',
+            ),
+            'aria-label': t('Credential JSON or backup file path', '凭据 JSON 或备份文件路径'),
+            disabled: busy,
+            onChange: (e) => { setImportContent(e.target.value ?? ''); setPanelError(null) },
+          }),
+          h('div', { className: 'dsh-agy-inline-row-wrap' },
+            h(SmallButton, {
+              variant: 'primary',
+              'data-agy-import-submit': 'true',
+              disabled: busy,
+              onClick: () => void submitImport(),
+              style: { height: 32, padding: '0 14px' },
+            }, running(IMPORT_PENDING, 'import') ? '…' : t('Import credential', '确认导入')),
+            h(SmallButton, {
+              disabled: busy,
+              onClick: () => { setImportOpen(false); setImportContent(''); setImportRemark('') },
+              style: { height: 32, padding: '0 12px' },
+            }, t('Cancel', '取消')))) : null,
+        panelNotice ? h('div', { role: 'status', className: 'dsh-agy-row-notice', 'data-agy-panel-notice': 'true' }, panelNotice) : null,
         h('div', { className: 'dsh-agy-account-list' }, ...rows.map((row) => h(AccountCard, {
           key: row.id,
           row,
+          isWindows,
           busy,
           runningKind: busyId === row.id ? pending.kind : null,
           editing: editingId === row.id,
@@ -2187,6 +2506,9 @@ window.__ModuleLoader__.load({
           code: codes[row.id] || '',
           error: editorId === row.id ? null : (rowErrors[row.id] || null),
           notice: rowNotices[row.id] || null,
+          onSwitchAccount: typeof props.client.switchAccount === 'function' ? () => void switchAccount(row) : undefined,
+          onRecheck: typeof props.client.recheckAccount === 'function' ? () => void recheckAccount(row) : undefined,
+          onAckDowngrade: typeof props.client.ackDowngrade === 'function' ? () => void ackDowngrade(row) : undefined,
           onToggleQuota: () => toggleAccountQuota(row),
           onRefreshQuota: () => loadAccountQuota(row, true),
           onToggleEnabled: () => toggleRow(row),
@@ -2285,6 +2607,9 @@ window.__ModuleLoader__.load({
       const [error, setError] = React.useState(null)
       const [open, setOpen] = React.useState(false)
       const [busy, setBusy] = React.useState(false)
+      const [switchingId, setSwitchingId] = React.useState(null)
+      const [switchError, setSwitchError] = React.useState(null)
+      const [rechecking, setRechecking] = React.useState(false)
 
       // The model on screen, read through a ref so a refresh always asks about
       // the current selection, and a sequence counter so an answer that arrives
@@ -2321,7 +2646,55 @@ window.__ModuleLoader__.load({
         } finally {
           if (seq === seqRef.current) setBusy(false)
         }
-      }, [props.client, syncStatus])
+      }, [props.client, props.sessionId, syncStatus])
+
+      const switchSessionAccount = React.useCallback(async (targetId) => {
+        if (typeof props.client.switchAccount !== 'function' || switchingId !== null) return
+        setSwitchingId(targetId)
+        setSwitchError(null)
+        try {
+          const nextStatus = await props.client.switchAccount({
+            accountId: targetId,
+            ...(props.sessionId ? { sessionId: props.sessionId } : {}),
+          })
+          if (nextStatus && typeof nextStatus === 'object') setRuntimeStatus(nextStatus)
+          await refresh(true)
+        } catch (e) {
+          setSwitchError(e instanceof Error ? e.message : String(e))
+        } finally {
+          setSwitchingId(null)
+        }
+      }, [props.client, props.sessionId, switchingId, refresh])
+
+      const unpinSessionAccount = React.useCallback(async () => {
+        if (typeof props.client.switchAccount !== 'function' || !props.sessionId || switchingId !== null) return
+        setSwitchingId('__auto__')
+        setSwitchError(null)
+        try {
+          const nextStatus = await props.client.switchAccount({ sessionId: props.sessionId, clear: true })
+          if (nextStatus && typeof nextStatus === 'object') setRuntimeStatus(nextStatus)
+          await refresh(true)
+        } catch (e) {
+          setSwitchError(e instanceof Error ? e.message : String(e))
+        } finally {
+          setSwitchingId(null)
+        }
+      }, [props.client, props.sessionId, switchingId, refresh])
+
+      const recheckCurrentAccount = React.useCallback(async (targetId) => {
+        if (typeof props.client.recheckAccount !== 'function' || !targetId || rechecking) return
+        setRechecking(true)
+        setSwitchError(null)
+        try {
+          const result = await props.client.recheckAccount({ accountId: targetId })
+          if (result && result.status && typeof result.status === 'object') setRuntimeStatus(result.status)
+          await refresh(true)
+        } catch (e) {
+          setSwitchError(e instanceof Error ? e.message : String(e))
+        } finally {
+          setRechecking(false)
+        }
+      }, [props.client, rechecking, refresh])
 
       React.useEffect(() => {
         if (!active) { setOpen(false); return undefined }
@@ -2382,13 +2755,51 @@ window.__ModuleLoader__.load({
       const unavailable = !!(quota && view && view.entitled === false && !unknown)
       const modelFamily = quotaFamilyOf(selection.model)
       const familyShort = modelFamily === 'claude' ? 'Claude' : modelFamily === 'argon' ? 'Argon' : 'Gemini'
+      const statusAccounts = runtimeStatus && Array.isArray(runtimeStatus.accounts)
+        ? runtimeStatus.accounts.filter((a) => a && typeof a === 'object')
+        : []
+      const pinnedMap = runtimeStatus && runtimeStatus.pinnedSessions && typeof runtimeStatus.pinnedSessions === 'object'
+        ? runtimeStatus.pinnedSessions
+        : null
+      const sessionAccountsMap = runtimeStatus && runtimeStatus.sessionAccounts && typeof runtimeStatus.sessionAccounts === 'object'
+        ? runtimeStatus.sessionAccounts
+        : null
+      const pinnedAccountId = props.sessionId && pinnedMap && typeof pinnedMap[props.sessionId] === 'string'
+        ? pinnedMap[props.sessionId]
+        : null
+      const currentAccountId = (quota && typeof quota.accountId === 'string' && quota.accountId.length > 0)
+        ? quota.accountId
+        : pinnedAccountId
+          || (props.sessionId && sessionAccountsMap && typeof sessionAccountsMap[props.sessionId] === 'string' ? sessionAccountsMap[props.sessionId] : null)
+      const currentAccountRow = currentAccountId
+        ? statusAccounts.find((a) => a.id === currentAccountId) || null
+        : null
       const accountText = quota && (quota.accountLabel || quota.accountId)
         ? String(quota.accountLabel || quota.accountId)
-        : ''
+        : currentAccountRow
+          ? accountTitle(currentAccountRow)
+          : ''
       const planText = quota && (quota.subscriptionName || quota.subscriptionTier)
         ? String(quota.subscriptionName || quota.subscriptionTier)
-        : ''
+        : currentAccountRow && (currentAccountRow.subscriptionName || currentAccountRow.subscriptionTier)
+          ? String(currentAccountRow.subscriptionName || currentAccountRow.subscriptionTier)
+          : ''
       const attribution = [accountText, planText].filter(Boolean).join(' · ')
+      const showMultiAccountUi = statusAccounts.length >= 2 && typeof props.client.switchAccount === 'function'
+      const summaryPctFor = (acc) => {
+        if (acc.id === currentAccountId && primary && Number.isFinite(primary.remainingFraction)) {
+          return primary.remainingFraction
+        }
+        const qs = acc.quotaSummary && typeof acc.quotaSummary === 'object' ? acc.quotaSummary : null
+        if (!qs) return null
+        if (modelFamily === 'claude') return typeof qs.claude === 'number' ? qs.claude : (typeof qs.primary === 'number' ? qs.primary : null)
+        if (modelFamily === 'argon') {
+          if (typeof qs.argon === 'number') return qs.argon
+          if (acc.subscriptionTier === 'ULTRA' && typeof qs.gemini === 'number') return qs.gemini
+          return null
+        }
+        return typeof qs.gemini === 'number' ? qs.gemini : (typeof qs.primary === 'number' ? qs.primary : null)
+      }
       const rawBuckets = group ? group.buckets : []
       const buckets = sortBuckets(rawBuckets)
       const primary = rawBuckets.find(isWeeklyBucket) || rawBuckets[0]
@@ -2401,12 +2812,20 @@ window.__ModuleLoader__.load({
         : pillTitle(primary, short, error, family)
       // Name the account behind the number: two signed-in plans must never look
       // like one shared quota.
+      const needsVerify = !!(quota && quota.verificationRequired === true)
+      const isTosSuspended = !!(quota && quota.tosSuspended === true)
+      const downgradeAlert = quota && quota.downgradeAlert && quota.downgradeAlert.acknowledged !== true ? quota.downgradeAlert : null
       const tooltipBase = !unavailable && primary && attribution.length > 0
         ? `${baseTooltip} · ${attribution}`
         : baseTooltip
-      const tooltip = isDegraded
-        ? `${tooltipBase}${t(' · May be degraded', ' · 可能降智')}`
-        : tooltipBase
+      const healthNote = isTosSuspended
+        ? t(' · Account suspended (ToS)', ' · 账号已封禁（ToS）')
+        : needsVerify
+          ? t(' · Verification required', ' · 需要验证账号')
+          : downgradeAlert
+            ? t(` · Downgraded ${downgradeAlert.fromTier}→${downgradeAlert.toTier}`, ` · 订阅已降级 ${downgradeAlert.fromTier}→${downgradeAlert.toTier}`)
+            : ''
+      const tooltip = `${tooltipBase}${healthNote}${isDegraded ? t(' · May be degraded', ' · 可能降智') : ''}`
 
       return h('span', { ref: rootRef, className: 'antigravity-quota-pill', style: { position: 'relative', display: 'inline-flex', alignItems: 'center' } },
         h('button', {
@@ -2418,7 +2837,7 @@ window.__ModuleLoader__.load({
           'data-agy-quota-account': accountText,
           'data-agy-quota-plan': planText,
           'data-agy-quota-entitled': unavailable ? 'false' : primary ? 'true' : 'pending',
-          onClick: () => { setOpen(!open); if (!open) void refresh(false) },
+          onClick: () => { setOpen(!open); if (!open) { setSwitchError(null); void refresh(false) } },
           style: {
             display: 'inline-flex',
             alignItems: 'center',
@@ -2432,7 +2851,7 @@ window.__ModuleLoader__.load({
             fontSize: 12,
             lineHeight: '18px',
             whiteSpace: 'nowrap',
-            opacity: open ? 0.92 : (isDegraded ? 0.96 : 0.8),
+            opacity: open ? 0.92 : (isDegraded || isTosSuspended || needsVerify ? 0.96 : 0.8),
             cursor: 'pointer',
           },
         },
@@ -2447,6 +2866,22 @@ window.__ModuleLoader__.load({
                 opacity: unavailable ? 0.66 : 1,
               },
             }, pillValue)),
+          showMultiAccountUi && accountText ? h('span', {
+            className: 'dsh-agy-pill-acc-chip',
+            'data-agy-pill-account-chip': 'true',
+          }, accountText) : null,
+          isTosSuspended ? h('span', {
+            className: 'dsh-agy-pill-alert dsh-agy-pill-alert-danger',
+            'data-agy-pill-tos': 'true',
+          }, t('Suspended', '已封禁')) : null,
+          !isTosSuspended && needsVerify ? h('span', {
+            className: 'dsh-agy-pill-alert dsh-agy-pill-alert-warn',
+            'data-agy-pill-verify': 'true',
+          }, t('Verify', '需验证')) : null,
+          !isTosSuspended && !needsVerify && downgradeAlert ? h('span', {
+            className: 'dsh-agy-pill-alert dsh-agy-pill-alert-warn',
+            'data-agy-pill-downgrade': 'true',
+          }, `${downgradeAlert.fromTier}→${downgradeAlert.toTier}`) : null,
           isDegraded ? h('span', {
             className: 'dsh-agy-degrade-pill',
             'data-agy-degraded': 'true',
@@ -2463,8 +2898,8 @@ window.__ModuleLoader__.load({
             zIndex: 50,
             boxSizing: 'border-box',
             width: 'max-content',
-            minWidth: 248,
-            maxWidth: 'min(320px, calc(100vw - 24px))',
+            minWidth: 268,
+            maxWidth: 'min(340px, calc(100vw - 24px))',
             padding: '12px 14px',
             borderRadius: 12,
             background: 'var(--dsw-alias-surface-overlay, var(--dsw-alias-bg-overlay, var(--dsw-specific-menu, Canvas)))',
@@ -2498,6 +2933,55 @@ window.__ModuleLoader__.load({
                 cursor: busy ? 'default' : 'pointer',
               },
             }, busy ? '…' : t('Refresh', '刷新'))),
+          isTosSuspended ? h('div', {
+            role: 'alert',
+            className: 'dsh-agy-popover-alert dsh-agy-popover-alert-danger',
+            'data-agy-popover-tos': 'true',
+          },
+            h('span', null, t('This account is suspended for Terms of Service violation. Switch accounts below or submit an appeal.', '当前账号因违反服务条款（ToS）已被停用，可在下方切换其他账号或提交申诉。')),
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+              h('a', {
+                href: quota.tosAppealUrl || DEFAULT_TOS_APPEAL_URL,
+                target: '_blank',
+                rel: 'noreferrer',
+                className: 'dsh-agy-health-link',
+              }, t('Submit appeal', '提交申诉')),
+              currentAccountId && typeof props.client.recheckAccount === 'function' ? h('button', {
+                type: 'button',
+                className: 'dsh-agy-session-unpin',
+                'data-agy-popover-recheck': currentAccountId,
+                disabled: rechecking,
+                onClick: () => void recheckCurrentAccount(currentAccountId),
+              }, rechecking ? '…' : t('Recheck', '重新检测')) : null)) : null,
+          needsVerify ? h('div', {
+            role: 'alert',
+            className: 'dsh-agy-popover-alert dsh-agy-popover-alert-warn',
+            'data-agy-popover-verify': 'true',
+          },
+            h('span', null, t('Google requires browser verification before this account can continue.', 'Google 要求先完成浏览器验证后才能继续使用此账号。')),
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+              quota.verificationUrl ? h('a', {
+                href: quota.verificationUrl,
+                target: '_blank',
+                rel: 'noreferrer',
+                className: 'dsh-agy-health-link',
+              }, t('Verify account', '前往验证')) : null,
+              currentAccountId && typeof props.client.recheckAccount === 'function' ? h('button', {
+                type: 'button',
+                className: 'dsh-agy-session-unpin',
+                'data-agy-popover-recheck': currentAccountId,
+                disabled: rechecking,
+                onClick: () => void recheckCurrentAccount(currentAccountId),
+              }, rechecking ? '…' : t('Recheck', '已验证，重新检测')) : null)) : null,
+          downgradeAlert ? h('div', {
+            role: 'status',
+            className: 'dsh-agy-popover-alert dsh-agy-popover-alert-warn',
+            'data-agy-popover-downgrade': 'true',
+          },
+            h('span', null, t(
+              `Subscription downgraded: ${downgradeAlert.fromTier} → ${downgradeAlert.toTier}.`,
+              `订阅已降级：${downgradeAlert.fromTier} → ${downgradeAlert.toTier}。`,
+            ))) : null,
           unavailable
             ? h('div', {
               'data-agy-quota-unavailable': familyShort,
@@ -2563,24 +3047,89 @@ window.__ModuleLoader__.load({
               h('span', { style: { fontVariantNumeric: 'tabular-nums', fontWeight: 500, textAlign: 'right' } }, paused ? t('n/a', '不适用') : pct(b.remainingFraction)),
               h('span', { style: { opacity: 0.55, textAlign: 'right', fontSize: 11, fontVariantNumeric: 'tabular-nums' } }, paused ? '' : resetLabel(b.resetTime)))
           })) : null,
-          attribution ? h('div', {
-            className: 'dsh-agy-quota-attr',
+          showMultiAccountUi ? h('div', {
+            className: 'dsh-agy-session-switcher',
+            'data-agy-session-switcher': 'true',
             'data-agy-quota-account': accountText,
             'data-agy-quota-plan': planText,
-            style: {
-              marginTop: 9,
-              paddingTop: 8,
-              borderTop: '1px solid color-mix(in srgb, currentColor 10%, transparent)',
-              display: 'flex',
-              alignItems: 'baseline',
-              gap: 6,
-              fontSize: 11,
-              whiteSpace: 'normal',
-            },
           },
-            h('span', { style: { opacity: 0.62 } }, t('Account', '账号')),
-            h('span', { style: { fontWeight: 500, opacity: 0.9 } }, accountText || attribution),
-            planText ? h('span', { style: { opacity: 0.62 } }, `· ${planText}`) : null) : null,
+            h('div', { className: 'dsh-agy-session-switcher-head' },
+              h('span', { className: 'dsh-agy-session-switcher-title' },
+                props.sessionId
+                  ? (pinnedAccountId ? t('Session account (pinned)', '当前会话账号（已指定）') : t('Session account', '当前会话账号'))
+                  : t('Default account', '默认账号')),
+              pinnedAccountId && props.sessionId ? h('button', {
+                type: 'button',
+                className: 'dsh-agy-session-unpin',
+                'data-agy-session-unpin': 'true',
+                disabled: switchingId !== null,
+                onClick: () => void unpinSessionAccount(),
+              }, switchingId === '__auto__' ? '…' : t('Auto', '恢复自动')) : null),
+            h('div', { className: 'dsh-agy-session-acc-list', role: 'listbox', 'aria-label': t('Switch session account', '切换当前会话账号') },
+              ...statusAccounts.map((acc) => {
+                const isSelected = acc.id === currentAccountId
+                const canSelect = signedIn(acc) || acc.hasRefreshToken === true
+                const rowTier = acc.subscriptionTier ? String(acc.subscriptionTier).toUpperCase() : ''
+                const rowTierCls = rowTier === 'ULTRA'
+                  ? 'dsh-agy-session-tier dsh-agy-session-tier-ultra'
+                  : rowTier === 'PRO'
+                    ? 'dsh-agy-session-tier dsh-agy-session-tier-pro'
+                    : 'dsh-agy-session-tier'
+                const frac = summaryPctFor(acc)
+                const isSwitchingThis = switchingId === acc.id
+                return h('button', {
+                  key: acc.id,
+                  type: 'button',
+                  role: 'option',
+                  'aria-selected': isSelected,
+                  className: 'dsh-agy-session-acc-row',
+                  'data-agy-pill-switch-account': acc.id,
+                  'data-agy-pill-account-selected': isSelected ? 'true' : 'false',
+                  disabled: !canSelect || switchingId !== null,
+                  title: [accountTitle(acc), acc.email && acc.email !== accountTitle(acc) ? acc.email : '', acc.subscriptionName || rowTier].filter(Boolean).join(' · '),
+                  onClick: () => {
+                    if (isSelected && pinnedAccountId === acc.id) return
+                    void switchSessionAccount(acc.id)
+                  },
+                },
+                  h('span', { className: 'dsh-agy-session-acc-left' },
+                    h('span', { className: 'dsh-agy-session-acc-dot', 'aria-hidden': 'true' }, isSwitchingThis ? '…' : (isSelected ? '✓' : '')),
+                    h('span', { className: 'dsh-agy-session-acc-name' }, accountTitle(acc))),
+                  h('span', { className: 'dsh-agy-session-acc-right' },
+                    rowTier ? h('span', { className: rowTierCls }, rowTier) : null,
+                    acc.tosSuspended === true
+                      ? h('span', { style: { color: '#d9534f', fontWeight: 600 } }, t('Suspended', '已封禁'))
+                      : acc.verificationRequired === true
+                        ? h('span', { style: { color: '#b7791f', fontWeight: 600 } }, t('Verify', '需验证'))
+                        : !canSelect
+                          ? h('span', { style: { opacity: 0.58 } }, t('Signed out', '未登录'))
+                          : frac !== null
+                            ? h('span', { style: { opacity: 0.85, color: frac < 0.15 ? '#d9534f' : 'inherit' } }, pct(frac))
+                            : null))
+              })),
+            switchError ? h('div', {
+              role: 'alert',
+              'data-agy-switch-error': 'true',
+              style: { color: '#d9534f', fontSize: 11, whiteSpace: 'normal' },
+            }, switchError) : null)
+            : attribution ? h('div', {
+              className: 'dsh-agy-quota-attr',
+              'data-agy-quota-account': accountText,
+              'data-agy-quota-plan': planText,
+              style: {
+                marginTop: 9,
+                paddingTop: 8,
+                borderTop: '1px solid color-mix(in srgb, currentColor 10%, transparent)',
+                display: 'flex',
+                alignItems: 'baseline',
+                gap: 6,
+                fontSize: 11,
+                whiteSpace: 'normal',
+              },
+            },
+              h('span', { style: { opacity: 0.62 } }, t('Account', '账号')),
+              h('span', { style: { fontWeight: 500, opacity: 0.9 } }, accountText || attribution),
+              planText ? h('span', { style: { opacity: 0.62 } }, `· ${planText}`) : null) : null,
           isDegraded ? h('div', {
             className: 'dsh-agy-degrade-card',
             'data-agy-degrade-card': 'true',
@@ -2880,7 +3429,13 @@ window.__ModuleLoader__.load({
             disabled: busy,
             onStatus: adoptStatus,
           }) : null,
-          status ? h(AccountsPanel, { accounts: status.accounts, client: props.client, onStatus: adoptStatus }) : null),
+          status ? h(AccountsPanel, {
+            accounts: status.accounts,
+            platform: status.platform,
+            activeAccountId: status.activeAccountId,
+            client: props.client,
+            onStatus: adoptStatus,
+          }) : null),
         error ? h('div', { role: 'alert', style: { color: '#d9534f', fontSize: 12 } }, error) : null)
     }
 

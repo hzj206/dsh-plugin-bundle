@@ -12,7 +12,7 @@
  * @module dsh-llm-antigravity-acp/quota
  */
 import { SYSTEM_ACCOUNT_ID } from './accounts.js';
-import { inspectCloudCodeAccount, } from './cloudcode.js';
+import { inspectCloudCodeAccount, TosSuspendedError, VerificationRequiredError, } from './cloudcode.js';
 /**
  * Whether one window is the weekly (7-day) bucket. Upstream either names the
  * window `weekly` or encodes it in the bucket id (`gemini-weekly`, `3p-7d`), so
@@ -198,14 +198,14 @@ export class QuotaReader {
      * @param layout - optional account layout enabling direct Cloud Code inspection.
      * @returns the snapshot; failures resolve as `status: 'error'`.
      */
-    async readFor(accountId, env, force = false, layout) {
+    async readFor(accountId, env, force = false, layout, credentialOptions) {
         const hit = this.cached.get(accountId);
         if (!force && hit !== undefined && Date.now() - hit.at < this.ttlMs)
             return hit.snapshot;
         const running = this.inflight.get(accountId);
         if (!force && running !== undefined)
             return running;
-        const pending = this.fetch(accountId, env, layout).finally(() => {
+        const pending = this.fetch(accountId, env, layout, credentialOptions).finally(() => {
             if (this.inflight.get(accountId) === pending)
                 this.inflight.delete(accountId);
         });
@@ -224,7 +224,12 @@ export class QuotaReader {
     clear() {
         this.cached.clear();
     }
-    async fetch(accountId, env, layout) {
+    /** Forget the cached snapshot of one account. */
+    clearAccount(accountId) {
+        this.cached.delete(accountId);
+    }
+    async fetch(accountId, env, layout, credentialOptions) {
+        const allowCliFallback = credentialOptions?.allowCliFallback !== false;
         if (layout !== undefined) {
             try {
                 const inspected = await inspectCloudCodeAccount({
@@ -232,6 +237,7 @@ export class QuotaReader {
                     env,
                     runCommand: this.run,
                     ...(this.transport !== undefined ? { transport: this.transport } : {}),
+                    ...(credentialOptions !== undefined ? { credentialOptions } : {}),
                 });
                 if (inspected !== undefined) {
                     const snapshot = {
@@ -249,8 +255,46 @@ export class QuotaReader {
                     this.cached.set(accountId, { snapshot, at: Date.now() });
                     return snapshot;
                 }
+                if (!allowCliFallback) {
+                    return {
+                        status: 'error',
+                        updatedAt: new Date().toISOString(),
+                        groups: [],
+                        error: 'No saved credential found for this backup account.',
+                    };
+                }
             }
             catch (cloudError) {
+                if (cloudError instanceof VerificationRequiredError) {
+                    return {
+                        status: 'error',
+                        updatedAt: new Date().toISOString(),
+                        groups: this.cached.get(accountId)?.snapshot.groups ?? [],
+                        error: cloudError.message,
+                        verificationRequired: true,
+                        ...(cloudError.verificationUrl !== undefined ? { verificationUrl: cloudError.verificationUrl } : {}),
+                    };
+                }
+                if (cloudError instanceof TosSuspendedError) {
+                    return {
+                        status: 'error',
+                        updatedAt: new Date().toISOString(),
+                        groups: this.cached.get(accountId)?.snapshot.groups ?? [],
+                        error: cloudError.message,
+                        tosSuspended: true,
+                        tosAppealUrl: cloudError.appealUrl,
+                    };
+                }
+                // On Windows, an inactive backup slot must never fall back to `agy -p /usage`
+                // because `agy.exe` reads the global WinCred entry of the active account.
+                if (!allowCliFallback) {
+                    return {
+                        status: 'error',
+                        updatedAt: new Date().toISOString(),
+                        groups: this.cached.get(accountId)?.snapshot.groups ?? [],
+                        error: cloudError instanceof Error ? cloudError.message : String(cloudError),
+                    };
+                }
                 // Fall through to `agy -p /usage` if available; otherwise report the Cloud Code error.
                 const binary = this.binary();
                 if (binary === undefined) {

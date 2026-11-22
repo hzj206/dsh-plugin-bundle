@@ -16,9 +16,11 @@
 import { existsSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import type { TierDowngradeAlert, TierHistoryEntry } from './account-health.ts'
 import type { AccountProfile } from './config.ts'
-import { decodeStoredCredential, readStoredCredentialRaw } from './credential.ts'
+import { decodeStoredCredential, readStoredCredentialRaw, type ReadCredentialOptions } from './credential.ts'
 import { defaultHome, prepareHome, type CommandRunner } from './preflight.ts'
+import { parseOAuthBlob } from './wincred.ts'
 
 /** Id of the implicit account that reuses this machine's own login. */
 export const SYSTEM_ACCOUNT_ID = 'default'
@@ -166,6 +168,33 @@ export interface AccountStatus {
   sessions: number
   /** Signed-in address read from this account's own credential store. */
   email: string | undefined
+  /** True when this account is currently selected as the global default for new sessions. */
+  active?: boolean
+  /** True when the account's stored credential holds a permanent `refresh_token`. */
+  hasRefreshToken?: boolean
+  /** Cached weekly remaining fraction per quota family (`0..1`) for quick composer display. */
+  quotaSummary?: {
+    gemini?: number
+    claude?: number
+    argon?: number
+    primary?: number
+  }
+  /** True when Google requires browser verification for this account (403 VALIDATION_REQUIRED). */
+  verificationRequired?: boolean
+  /** Browser verification URL when upstream supplied one. */
+  verificationUrl?: string
+  /** True when Google suspended Antigravity on this account for Terms of Service violations. */
+  tosSuspended?: boolean
+  /** ISO timestamp when ToS suspension was first observed. */
+  tosSuspendedAt?: string
+  /** Official appeal form URL for ToS suspension. */
+  tosAppealUrl?: string
+  /** Last ToS suspension error message. */
+  tosError?: string
+  /** Active subscription downgrade alert (e.g. PRO -> FREE). */
+  downgradeAlert?: TierDowngradeAlert
+  /** Recent tier transition log for this account. */
+  tierHistory?: readonly TierHistoryEntry[]
   /** Authoritative subscription tier (`ULTRA` / `PRO` / `FREE` / `ENTERPRISE`) from `loadCodeAssist`. */
   subscriptionTier?: 'ULTRA' | 'PRO' | 'FREE' | 'ENTERPRISE'
   /** Human-readable plan name (e.g. `Google AI Ultra`, `Google AI Pro`). */
@@ -490,6 +519,15 @@ export function accountEnv(layout: AccountLayout, platform: NodeJS.Platform = pr
     // Without a session bus the keyring implementation cannot reach a desktop
     // secret service and falls back to the account's own credential file.
     if (platform === 'linux') env.DBUS_SESSION_BUS_ADDRESS = `unix:path=${join(layout.root ?? layout.homeDir, '.no-dbus-session')}`
+    // On Windows, `agy.exe` resolves its home from `%USERPROFILE%` (Go's
+    // `os.UserHomeDir`) and reads the global Windows Credential Manager entry
+    // (`gemini:antigravity`) unless its `wslDetector` sees `WSL_INTEROP`, which
+    // switches `compositeTokenStorage` to per-slot file storage without touching
+    // WinCred. That gives non-system Windows accounts true concurrent isolation.
+    if (platform === 'win32') {
+      env.USERPROFILE = layout.homeDir
+      env.WSL_INTEROP = 'dsh-isolated-slot'
+    }
   }
   return env
 }
@@ -527,7 +565,14 @@ export function cliEnv(
       if (value !== undefined && WINDOWS_PROFILE_ENV.has(key.toUpperCase())) base[key] = value
     }
   }
-  return overlay === undefined ? { ...base, HOME: homedir() } : { ...base, ...overlay }
+  if (overlay === undefined) return { ...base, HOME: homedir() }
+  if (platform === 'win32') {
+    const overlayUpper = new Set(Object.keys(overlay).map(k => k.toUpperCase()))
+    for (const key of Object.keys(base)) {
+      if (overlayUpper.has(key.toUpperCase())) delete base[key]
+    }
+  }
+  return { ...base, ...overlay }
 }
 
 /**
@@ -602,9 +647,43 @@ export async function readAccountEmail(
   layout: AccountLayout,
   run: CommandRunner,
   platform: NodeJS.Platform = process.platform,
+  credentialOptions?: ReadCredentialOptions,
 ): Promise<string | undefined> {
-  const raw = await readStoredCredentialRaw(layout, run, platform, (blob) => emailFromToken(blob) !== undefined)
+  const raw = await readStoredCredentialRaw(
+    layout,
+    run,
+    platform,
+    (blob) => emailFromToken(blob) !== undefined,
+    credentialOptions,
+  )
   return raw === undefined ? undefined : emailFromToken(raw)
+}
+
+/**
+ * Read both the email and refresh-token presence of one account in a single store lookup.
+ * @param layout - account layout.
+ * @param run - helper command runner.
+ * @param platform - target platform, injectable for tests.
+ * @param credentialOptions - Windows active-slot routing flags.
+ * @returns email and refresh-token status.
+ */
+export async function readAccountIdentity(
+  layout: AccountLayout,
+  run: CommandRunner,
+  platform: NodeJS.Platform = process.platform,
+  credentialOptions?: ReadCredentialOptions,
+): Promise<{ email: string | undefined; hasRefreshToken: boolean; raw: string | undefined }> {
+  const raw = await readStoredCredentialRaw(
+    layout,
+    run,
+    platform,
+    (blob) => emailFromToken(blob) !== undefined || parseOAuthBlob(blob) !== undefined,
+    credentialOptions,
+  )
+  if (raw === undefined) return { email: undefined, hasRefreshToken: false, raw: undefined }
+  const parsed = parseOAuthBlob(raw)
+  const email = parsed?.email ?? emailFromToken(raw)
+  return { email, hasRefreshToken: parsed?.hasRefreshToken === true, raw }
 }
 
 interface PoolEntry {

@@ -17,6 +17,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { decodeStoredCredential, readStoredCredentialRaw } from './credential.js';
 import { defaultHome, prepareHome } from './preflight.js';
+import { parseOAuthBlob } from './wincred.js';
 /** Id of the implicit account that reuses this machine's own login. */
 export const SYSTEM_ACCOUNT_ID = 'default';
 /** Remark shown for the machine account until the user names it. */
@@ -363,6 +364,15 @@ export function accountEnv(layout, platform = process.platform) {
         // secret service and falls back to the account's own credential file.
         if (platform === 'linux')
             env.DBUS_SESSION_BUS_ADDRESS = `unix:path=${join(layout.root ?? layout.homeDir, '.no-dbus-session')}`;
+        // On Windows, `agy.exe` resolves its home from `%USERPROFILE%` (Go's
+        // `os.UserHomeDir`) and reads the global Windows Credential Manager entry
+        // (`gemini:antigravity`) unless its `wslDetector` sees `WSL_INTEROP`, which
+        // switches `compositeTokenStorage` to per-slot file storage without touching
+        // WinCred. That gives non-system Windows accounts true concurrent isolation.
+        if (platform === 'win32') {
+            env.USERPROFILE = layout.homeDir;
+            env.WSL_INTEROP = 'dsh-isolated-slot';
+        }
     }
     return env;
 }
@@ -395,7 +405,16 @@ export function cliEnv(overlay, platform = process.platform, parent = process.en
                 base[key] = value;
         }
     }
-    return overlay === undefined ? { ...base, HOME: homedir() } : { ...base, ...overlay };
+    if (overlay === undefined)
+        return { ...base, HOME: homedir() };
+    if (platform === 'win32') {
+        const overlayUpper = new Set(Object.keys(overlay).map(k => k.toUpperCase()));
+        for (const key of Object.keys(base)) {
+            if (overlayUpper.has(key.toUpperCase()))
+                delete base[key];
+        }
+    }
+    return { ...base, ...overlay };
 }
 /**
  * Shell command that signs one account in from a terminal.
@@ -460,9 +479,25 @@ export async function ensureLoginKeychain(layout, run) {
  * @param platform - target platform, injectable for tests.
  * @returns the email, or undefined when the account is not signed in.
  */
-export async function readAccountEmail(layout, run, platform = process.platform) {
-    const raw = await readStoredCredentialRaw(layout, run, platform, (blob) => emailFromToken(blob) !== undefined);
+export async function readAccountEmail(layout, run, platform = process.platform, credentialOptions) {
+    const raw = await readStoredCredentialRaw(layout, run, platform, (blob) => emailFromToken(blob) !== undefined, credentialOptions);
     return raw === undefined ? undefined : emailFromToken(raw);
+}
+/**
+ * Read both the email and refresh-token presence of one account in a single store lookup.
+ * @param layout - account layout.
+ * @param run - helper command runner.
+ * @param platform - target platform, injectable for tests.
+ * @param credentialOptions - Windows active-slot routing flags.
+ * @returns email and refresh-token status.
+ */
+export async function readAccountIdentity(layout, run, platform = process.platform, credentialOptions) {
+    const raw = await readStoredCredentialRaw(layout, run, platform, (blob) => emailFromToken(blob) !== undefined || parseOAuthBlob(blob) !== undefined, credentialOptions);
+    if (raw === undefined)
+        return { email: undefined, hasRefreshToken: false, raw: undefined };
+    const parsed = parseOAuthBlob(raw);
+    const email = parsed?.email ?? emailFromToken(raw);
+    return { email, hasRefreshToken: parsed?.hasRefreshToken === true, raw };
 }
 /**
  * Priority-first, weighted load-balancing scheduler over the account layouts:

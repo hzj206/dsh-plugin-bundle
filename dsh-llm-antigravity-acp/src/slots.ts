@@ -32,6 +32,12 @@ export interface AccountSlot {
   readyAt: number
   /** Signed-in address read from this account's own credential store. */
   email: string | undefined
+  /** Whether the stored credential carries a permanent `refresh_token`. */
+  hasRefreshToken: boolean
+  /** True when Google asked this account to complete browser verification (403 VALIDATION_REQUIRED). */
+  verificationRequired: boolean
+  /** Browser verification link returned by Cloud Code PA, when any. */
+  verificationUrl: string | undefined
   /** Authoritative subscription tier from `loadCodeAssist`. */
   subscriptionTier: SubscriptionTier | undefined
   /** Human-readable plan name from `loadCodeAssist`. */
@@ -54,10 +60,10 @@ export interface AccountSlot {
  * @param layout - account layout the slot serves.
  * @returns the new slot.
  */
-export function newSlot(layout: AccountLayout): AccountSlot {
+export function newSlot(layout: AccountLayout, platform: NodeJS.Platform = process.platform): AccountSlot {
   return {
     layout,
-    env: accountEnv(layout),
+    env: accountEnv(layout, platform),
     preflight: undefined,
     preflightPromise: undefined,
     process: undefined,
@@ -68,6 +74,9 @@ export function newSlot(layout: AccountLayout): AccountSlot {
     error: undefined,
     readyAt: 0,
     email: undefined,
+    hasRefreshToken: false,
+    verificationRequired: false,
+    verificationUrl: undefined,
     subscriptionTier: undefined,
     subscriptionName: undefined,
     availableModels: undefined,
@@ -83,12 +92,13 @@ export function newSlot(layout: AccountLayout): AccountSlot {
  * environment), keeping the state that belongs to the account itself.
  * @param slot - slot to update in place.
  * @param layout - freshly resolved layout for the same account id.
+ * @param platform - host platform, injectable for tests.
  * @returns true when the environment overlay changed, so the caller can restart
  * a running ACP front that would otherwise keep the old one.
  */
-export function rebaseSlot(slot: AccountSlot, layout: AccountLayout): boolean {
+export function rebaseSlot(slot: AccountSlot, layout: AccountLayout, platform: NodeJS.Platform = process.platform): boolean {
   slot.layout = layout
-  const nextEnv = accountEnv(layout)
+  const nextEnv = accountEnv(layout, platform)
   const envChanged = JSON.stringify(slot.env) !== JSON.stringify(nextEnv)
   slot.env = nextEnv
   return envChanged

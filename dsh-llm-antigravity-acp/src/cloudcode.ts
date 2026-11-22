@@ -18,10 +18,11 @@
  * @module dsh-llm-antigravity-acp/cloudcode
  */
 
+import { DEFAULT_TOS_APPEAL_URL } from './account-health.ts'
 import { proxyUrlFromEnv, type AccountLayout } from './accounts.ts'
 import type { CatalogModel } from './catalog.ts'
 import { EFFORTS, type Effort } from './config.ts'
-import { decodeStoredCredential, readStoredCredentialRaw } from './credential.ts'
+import { decodeStoredCredential, persistRefreshedCredentialFile, readStoredCredentialRaw, type ReadCredentialOptions } from './credential.ts'
 import type { CommandRunner } from './preflight.ts'
 import type { QuotaBucket, QuotaGroup } from './quota.ts'
 
@@ -168,8 +169,15 @@ export async function readAccountOAuthCredential(
   layout: AccountLayout,
   run: CommandRunner,
   platform: NodeJS.Platform = process.platform,
+  credentialOptions?: ReadCredentialOptions,
 ): Promise<StoredOAuthCredential | undefined> {
-  const raw = await readStoredCredentialRaw(layout, run, platform, (blob) => parseStoredOAuthCredential(blob) !== undefined)
+  const raw = await readStoredCredentialRaw(
+    layout,
+    run,
+    platform,
+    (blob) => parseStoredOAuthCredential(blob) !== undefined,
+    credentialOptions,
+  )
   return raw === undefined ? undefined : parseStoredOAuthCredential(raw)
 }
 
@@ -213,11 +221,17 @@ export function createCloudCodeTransport(run: CommandRunner): CloudCodeTransport
   }
 }
 
+interface RefreshedOAuthToken {
+  accessToken: string
+  expiresInSeconds?: number
+  refreshToken?: string
+}
+
 async function refreshAccessToken(
   refreshToken: string,
   transport: CloudCodeTransport,
   env?: NodeJS.ProcessEnv,
-): Promise<string | undefined> {
+): Promise<RefreshedOAuthToken | undefined> {
   for (const client of OAUTH_CANDIDATE_CLIENTS) {
     const form = new URLSearchParams({
       client_id: client.id,
@@ -234,7 +248,13 @@ async function refreshAccessToken(
       )
       const body = asRecord(res.body)
       if (res.status >= 200 && res.status < 300 && typeof body?.access_token === 'string' && body.access_token.length > 0) {
-        return body.access_token
+        const expiresInSeconds = typeof body.expires_in === 'number' && Number.isFinite(body.expires_in) ? body.expires_in : undefined
+        const nextRefresh = typeof body.refresh_token === 'string' && body.refresh_token.trim().length > 0 ? body.refresh_token.trim() : undefined
+        return {
+          accessToken: body.access_token,
+          ...(expiresInSeconds !== undefined ? { expiresInSeconds } : {}),
+          ...(nextRefresh !== undefined ? { refreshToken: nextRefresh } : {}),
+        }
       }
     } catch {
       // Try next candidate OAuth client.
@@ -843,6 +863,126 @@ async function postWithFallback(
 }
 
 /**
+ * Raised when Cloud Code PA answers 403 `VALIDATION_REQUIRED`: Google wants the
+ * account owner to confirm the account in a browser before it serves again.
+ */
+export class VerificationRequiredError extends Error {
+  readonly code = 'VALIDATION_REQUIRED'
+  /**
+   * @param message - upstream message, e.g. "Verify your account to continue."
+   * @param verificationUrl - browser link that clears the check, when upstream gave one.
+   */
+  constructor(message: string, readonly verificationUrl?: string) {
+    super(message)
+    this.name = 'VerificationRequiredError'
+  }
+}
+
+/**
+ * Raised when Cloud Code PA answers 403 for a Terms of Service suspension.
+ */
+export class TosSuspendedError extends Error {
+  readonly code = 'TOS_SUSPENDED'
+  /**
+   * @param message - upstream ToS suspension message.
+   * @param appealUrl - appeal form link when present or the official default.
+   */
+  constructor(message: string, readonly appealUrl: string = DEFAULT_TOS_APPEAL_URL) {
+    super(message)
+    this.name = 'TosSuspendedError'
+  }
+}
+
+/**
+ * Whether raw text looks like Google's account-verification demand.
+ * @param text - error or response text.
+ * @returns true when account verification is required.
+ */
+export function isVerificationText(text: string): boolean {
+  return /VALIDATION_REQUIRED|verify your account|not eligible for antigravity/i.test(text)
+}
+
+/**
+ * Whether raw text looks like a Google Terms of Service suspension.
+ * @param text - error or response text.
+ * @returns true when the account is suspended for ToS violations.
+ */
+export function isTosSuspensionText(text: string): boolean {
+  return /violation of terms of service|disabled in this account.*terms of service|submit an appeal to continue using this product/i.test(text)
+}
+
+/**
+ * Read a Cloud Code 403 body for Google's account-verification demand.
+ * @param body - parsed JSON body or raw text.
+ * @returns the message and link, or undefined when the body is not a verification demand.
+ */
+export function parseVerificationRequired(body: unknown): { message: string; verificationUrl?: string } | undefined {
+  let data: unknown = body
+  if (typeof body === 'string') {
+    try {
+      data = JSON.parse(body)
+    } catch {
+      if (!isVerificationText(body)) return undefined
+      const link = /https:\/\/accounts\.google\.com\/[^\s"'<>\\]+/.exec(body)
+      return { message: 'Verify your account to continue.', ...(link ? { verificationUrl: link[0] } : {}) }
+    }
+  }
+  const record = asRecord(data)
+  const error = asRecord(record?.error) ?? record
+  const details = Array.isArray(error?.details) ? error.details as Array<Record<string, unknown>> : []
+  const info = details.find(d => d !== null && typeof d === 'object' && d.reason === 'VALIDATION_REQUIRED')
+  const helpUrl = details
+    .flatMap(d => (Array.isArray(d?.links) ? d.links as Array<{ url?: unknown }> : []))
+    .map(l => l?.url)
+    .find((u): u is string => typeof u === 'string' && /^https:\/\/accounts\.google\.com\//.test(u))
+  const errMsg = typeof error?.message === 'string' ? error.message : ''
+  if (info === undefined && !isVerificationText(errMsg)) return undefined
+  const meta = asRecord(info?.metadata)
+  const validationUrl = meta?.validation_url
+  const url = typeof validationUrl === 'string' && /^https:\/\//.test(validationUrl) ? validationUrl : helpUrl
+  const message = typeof meta?.validation_error_message === 'string' && meta.validation_error_message.length > 0
+    ? meta.validation_error_message
+    : (errMsg.length > 0 ? errMsg : 'Verify your account to continue.')
+  return { message, ...(url !== undefined ? { verificationUrl: url } : {}) }
+}
+
+/**
+ * Read a Cloud Code 403 body for a Terms-of-Service account suspension.
+ * @param body - parsed JSON body or raw text.
+ * @returns the message and appeal link, or undefined when not a ToS suspension.
+ */
+export function parseTosSuspended(body: unknown): { message: string; appealUrl: string } | undefined {
+  const raw = typeof body === 'string' ? body : JSON.stringify(body ?? '')
+  if (!isTosSuspensionText(raw)) return undefined
+  let message = 'This service has been disabled in this account for violation of Terms of Service.'
+  let appealUrl = DEFAULT_TOS_APPEAL_URL
+  const record = typeof body === 'string'
+    ? (() => { try { return asRecord(JSON.parse(body)) } catch { return undefined } })()
+    : asRecord(body)
+  const error = asRecord(record?.error) ?? record
+  if (typeof error?.message === 'string' && error.message.trim().length > 0) {
+    message = error.message.trim()
+  }
+  const details = Array.isArray(error?.details) ? error.details as Array<Record<string, unknown>> : []
+  for (const d of details) {
+    const meta = asRecord(d?.metadata)
+    if (typeof meta?.appeal_url === 'string' && /^https:\/\//.test(meta.appeal_url)) {
+      appealUrl = meta.appeal_url
+      break
+    }
+    if (Array.isArray(d?.links)) {
+      for (const link of d.links as Array<{ url?: unknown }>) {
+        if (typeof link?.url === 'string' && /^https:\/\/(?:forms\.gle|docs\.google\.com\/forms)\//.test(link.url)) {
+          appealUrl = link.url
+          break
+        }
+      }
+    }
+  }
+  return { message, appealUrl }
+}
+
+/**
  * Inspect one Antigravity account directly against Cloud Code PA (`loadCodeAssist`,
  * `retrieveUserQuotaSummary`, `fetchAvailableModels`).
  * @param options - account layout, environment, command runner, and optional transport override.
@@ -855,8 +995,14 @@ export async function inspectCloudCodeAccount(options: {
   runCommand: CommandRunner
   transport?: CloudCodeTransport
   platform?: NodeJS.Platform
+  credentialOptions?: ReadCredentialOptions
 }): Promise<CloudCodeInspection | undefined> {
-  const cred = await readAccountOAuthCredential(options.layout, options.runCommand, options.platform)
+  const cred = await readAccountOAuthCredential(
+    options.layout,
+    options.runCommand,
+    options.platform,
+    options.credentialOptions,
+  )
   if (cred === undefined) return undefined
 
   const transport = options.transport ?? createCloudCodeTransport(options.runCommand)
@@ -865,7 +1011,10 @@ export async function inspectCloudCodeAccount(options: {
     || (cred.expiryMs !== undefined && cred.expiryMs <= Date.now() + TOKEN_REFRESH_SKEW_MS)
   if (needsRefresh && cred.refreshToken !== undefined) {
     const refreshed = await refreshAccessToken(cred.refreshToken, transport, options.env)
-    if (refreshed !== undefined) accessToken = refreshed
+    if (refreshed !== undefined) {
+      accessToken = refreshed.accessToken
+      persistRefreshedCredentialFile(options.layout.appDir, refreshed, options.layout)
+    }
   }
   if (accessToken.length === 0) return undefined
 
@@ -880,7 +1029,8 @@ export async function inspectCloudCodeAccount(options: {
   if (loadRes.status === 401 && cred.refreshToken !== undefined) {
     const refreshed = await refreshAccessToken(cred.refreshToken, transport, options.env)
     if (refreshed !== undefined) {
-      accessToken = refreshed
+      accessToken = refreshed.accessToken
+      persistRefreshedCredentialFile(options.layout.appDir, refreshed, options.layout)
       loadRes = await postWithFallback(
         '/v1internal:loadCodeAssist',
         accessToken,
@@ -892,6 +1042,12 @@ export async function inspectCloudCodeAccount(options: {
   }
   if (loadRes.status === 401) {
     throw new Error('Antigravity OAuth token expired or revoked (HTTP 401)')
+  }
+  if (loadRes.status === 403) {
+    const verification = parseVerificationRequired(loadRes.body)
+    if (verification !== undefined) throw new VerificationRequiredError(verification.message, verification.verificationUrl)
+    const tos = parseTosSuspended(loadRes.body)
+    if (tos !== undefined) throw new TosSuspendedError(tos.message, tos.appealUrl)
   }
 
   const tierInfo = loadRes.status >= 200 && loadRes.status < 300
@@ -906,6 +1062,15 @@ export async function inspectCloudCodeAccount(options: {
     postWithFallback('/v1internal:retrieveUserQuotaSummary', accessToken, projectPayload, transport, options.env),
     postWithFallback('/v1internal:fetchAvailableModels', accessToken, projectPayload, transport, options.env),
   ])
+
+  // Check every 403 for verification or ToS suspension before judging the account fine.
+  for (const res of [loadRes, summaryRes, modelsRes]) {
+    if (res.status !== 403) continue
+    const verification = parseVerificationRequired(res.body)
+    if (verification !== undefined) throw new VerificationRequiredError(verification.message, verification.verificationUrl)
+    const tos = parseTosSuspended(res.body)
+    if (tos !== undefined) throw new TosSuspendedError(tos.message, tos.appealUrl)
+  }
 
   if (modelsRes.status === 403) {
     throw new Error(`Account forbidden (HTTP 403): ${typeof modelsRes.body === 'string' ? modelsRes.body : JSON.stringify(modelsRes.body)}`)

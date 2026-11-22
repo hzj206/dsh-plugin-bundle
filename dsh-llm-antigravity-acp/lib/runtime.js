@@ -7,17 +7,19 @@
  * @module dsh-llm-antigravity-acp/runtime
  */
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { existsSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { LlmError } from '@deepseek-ai/dsh-llm';
+import { AccountHealthStore, DEFAULT_TOS_APPEAL_URL, readActiveAccountRecord, readSessionAccountPins, writeActiveAccountRecord, writeSessionAccountPins, } from './account-health.js';
 import { AcpProcess } from './acp-process.js';
 import { applyModelAndEffort, detachBridge, freshReanswer, historyPrefixIntact, isOwnMessage, MAIN_PURPOSE, mountBridge, pendingInput, permissionState, planPrompt, } from './acp-session.js';
-import { AccountPool, accountProfileOf, accountVisibleModels, buildLayouts, ensureLayout, familyForModel, loginCommand, pluginHome, proxyUrlFromEnv, readAccountEmail, SYSTEM_ACCOUNT_ID, TRANSIENT_COOLDOWN_MS, } from './accounts.js';
+import { AccountPool, accountProfileOf, accountVisibleModels, buildLayouts, ensureLayout, familyForModel, loginCommand, pluginHome, proxyUrlFromEnv, readAccountEmail, readAccountIdentity, SYSTEM_ACCOUNT_ID, TRANSIENT_COOLDOWN_MS, } from './accounts.js';
 import { ModelCatalog, intersectVisible, isListedModel, nearestEffort } from './catalog.js';
+import { isTosSuspensionText, isVerificationText } from './cloudcode.js';
 import { asDegradeAction, asEffort, asEngineMode, current, EFFORTS } from './config.js';
 import { AcpTurn, AWAIT_TOOL, AWAIT_TOOL_NAME, CALL_TOOL, CALL_TOOL_NAME, degradedRouteError, isReanswerFailure, pumpStep, relayNotice } from './conversation.js';
-import { unlockAccountKeychain } from './credential.js';
+import { readStoredCredentialFileRaw, unlockAccountKeychain, writeSlotCredentialFile } from './credential.js';
 import { AGENT_TOOL_PREFIX, inputPrompt, LOCKED_REPLAY_BUDGET_BYTES, prepareNativeRequest, renderFullToolContracts, renderTranscript, replayPrompt, splitSystem, UNLOCKED_REPLAY_BUDGET_BYTES, } from './history.js';
 import { labeled } from './labels.js';
 import { JsonRpcClosedError, JsonRpcRemoteError } from './jsonrpc.js';
@@ -31,6 +33,7 @@ import { newSlot, rebaseSlot, slotDeniesModel, slotDisablesModel } from './slots
 import { answerPermission as decidePermission, boundBridgeContent, consumeToolDelta, filterToolsForEngineMode, MAX_EAGER_BRIDGE_TOOL_BYTES, resolveActiveToolSchemas, toBridgeTools, } from './tool-bridge.js';
 import { hasGenMetadata, isGemini4Flagship, peekMaxGenMetadataIdx, peekMaxModelStepIdx, readGenUsageAfter, readModelStepTail, readModelStepsAfter, sessionDbPath, } from './usage-db.js';
 import { delay, digest, KeyedMutex } from './util.js';
+import { parseImportedCredential, parseOAuthBlob, readWindowsCredential, writeWindowsCredential } from './wincred.js';
 // The tool-bridge helpers stay importable from this module for existing consumers.
 export { boundBridgeContent, boundBridgeToolText, compactBridgeTool, consumeToolDelta, filterToolsForEngineMode, MAX_BRIDGE_RESULT_BYTES, MAX_EAGER_BRIDGE_TOOL_BYTES, NATIVE_OVERLAPPING_DSH_TOOLS, resolveActiveToolSchemas, } from './tool-bridge.js';
 /** Parked calls answer with a still-running notice before Gemini cache TTL expiry and agy's 180-second MCP deadline. */
@@ -66,10 +69,18 @@ export class AntigravityRuntime {
     quota;
     /** Gemini home of the account that owns the shared model catalog. */
     primaryHome;
+    platform;
+    activeAccountFile;
+    sessionAccountsFile;
+    health;
     sessions;
     pool;
     slots = new Map();
     logins = new Map();
+    sessionAccountPins;
+    activeAccountId;
+    /** Monotonic epoch bumped on local credential mutations so stale background refreshes never clobber fresh slots. */
+    identityEpoch = 0;
     binary;
     lastError;
     lastAccount;
@@ -78,6 +89,8 @@ export class AntigravityRuntime {
     /** Per-turn call-id tags already issued or observed in history; keeps `<rootCallId>:ptc:<n>` unique session-wide. */
     usedTurnTags = new Set();
     mutex = new KeyedMutex();
+    /** Serializes Windows active-account credential swaps so concurrent clicks cannot race. */
+    switchMutex = new KeyedMutex();
     /** Serializes capacity checks and session creation so concurrent requests cannot overshoot maxLiveSessions. */
     capacityMutex = new KeyedMutex();
     /** Serializes pre-execution `gen_metadata` checks for parallel tool calls within the same conversation. */
@@ -91,16 +104,26 @@ export class AntigravityRuntime {
     /** @param host - host services. */
     constructor(host) {
         this.host = host;
+        this.platform = host.platform ?? process.platform;
         const layouts = this.resolveLayouts(host.config);
         this.pool = new AccountPool(layouts);
         for (const layout of layouts) {
-            this.slots.set(layout.id, newSlot(layout));
+            this.slots.set(layout.id, newSlot(layout, this.platform));
         }
         // The plugin's own data (session index, catalog cache) lives in the primary
         // account's directory when there is one. A provider with no account at all
         // keeps it under the plugin home, so a list the user emptied still boots and
         // can gain an account from the settings page afterwards.
         this.primaryHome = (this.pool.get(SYSTEM_ACCOUNT_ID) ?? layouts[0])?.geminiDir ?? pluginHome(host.config.home);
+        this.activeAccountFile = join(this.primaryHome, 'active-account.json');
+        this.sessionAccountsFile = join(this.primaryHome, 'session-accounts.json');
+        this.health = new AccountHealthStore(join(this.primaryHome, 'account-health.json'));
+        this.activeAccountId = this.resolveInitialActiveAccount(layouts);
+        this.sessionAccountPins = readSessionAccountPins(this.sessionAccountsFile);
+        for (const [sid, entry] of [...this.sessionAccountPins.entries()]) {
+            if (!this.slots.has(entry.accountId))
+                this.sessionAccountPins.delete(sid);
+        }
         this.sessions = new SessionStore(join(this.primaryHome, 'session-index.json'));
         this.catalog = new ModelCatalog(join(this.primaryHome, 'catalog.json'));
         this.catalog.applyVisibility(this.providerVisible());
@@ -109,10 +132,36 @@ export class AntigravityRuntime {
             callTool: request => this.callTool(request),
             authorize: (tenantKey, bearerToken) => this.authorizeTenant(tenantKey, bearerToken),
         }, { keepAliveMs: host.config.keepAliveMs, log: message => host.log.info(message) });
-        this.quota = new QuotaReader(() => this.binary, host.runCommand, host.config.quotaTtlMs);
+        this.quota = new QuotaReader(() => this.binary, host.runCommand, host.config.quotaTtlMs, host.cloudCodeTransport);
         void this.refreshAccountEmails();
         this.sweeper = setInterval(() => this.sweep(), 60_000);
         this.sweeper.unref?.();
+    }
+    resolveInitialActiveAccount(layouts) {
+        const persisted = readActiveAccountRecord(this.activeAccountFile);
+        if (persisted !== undefined && layouts.some(l => l.id === persisted.accountId)) {
+            return persisted.accountId;
+        }
+        if (this.platform === 'win32') {
+            return layouts.find(l => l.system)?.id;
+        }
+        return undefined;
+    }
+    /**
+     * Windows-safe credential read options for one account slot.
+     * The machine account (`system: true`) owns Windows Credential Manager; every
+     * non-system account runs in an isolated `USERPROFILE` + `WSL_INTEROP` file
+     * sandbox and reads only its own `antigravity-oauth-token` file, allowing true
+     * concurrent multi-account execution on Windows.
+     */
+    credentialOptionsFor(slot) {
+        if (this.platform !== 'win32')
+            return {};
+        return {
+            useWindowsCredentialManager: slot.layout.system,
+            syncFileOnWinCredRead: slot.layout.system,
+            allowCliFallback: true,
+        };
     }
     /**
      * Record the binding of one conversation so a later process can resume it.
@@ -350,22 +399,72 @@ export class AntigravityRuntime {
             }
             slot.process?.stop();
             this.slots.delete(id);
+            this.health.delete(id);
         }
+        let pinsChanged = false;
+        for (const [sid, entry] of [...this.sessionAccountPins.entries()]) {
+            if (!live.has(entry.accountId)) {
+                this.sessionAccountPins.delete(sid);
+                pinsChanged = true;
+            }
+        }
+        if (pinsChanged)
+            writeSessionAccountPins(this.sessionAccountsFile, this.sessionAccountPins);
         for (const layout of layouts) {
             const slot = this.slots.get(layout.id);
             if (slot === undefined) {
-                this.slots.set(layout.id, newSlot(layout));
+                this.slots.set(layout.id, newSlot(layout, this.platform));
                 continue;
             }
-            if (rebaseSlot(slot, layout) && slot.process !== undefined) {
+            if (rebaseSlot(slot, layout, this.platform) && slot.process !== undefined) {
                 this.stopSlotProcess(slot, 'Account environment changed; restarting ACP front.');
             }
+        }
+        if (this.activeAccountId !== undefined && !this.slots.has(this.activeAccountId)) {
+            const nextActive = layouts.find(l => l.system)?.id ?? layouts.find(l => l.enabled)?.id;
+            this.activeAccountId = nextActive;
+            if (nextActive !== undefined) {
+                writeActiveAccountRecord(this.activeAccountFile, {
+                    accountId: nextActive,
+                    switchedAt: new Date().toISOString(),
+                });
+            }
+        }
+        else if (this.activeAccountId === undefined && this.platform === 'win32') {
+            this.activeAccountId = this.resolveInitialActiveAccount(layouts);
         }
         this.quota.clear();
         this.recomputeUnionCatalog();
         void this.refreshAccountEmails();
     }
+    noteQuotaHealth(slot, snapshot) {
+        if (snapshot.verificationRequired === true) {
+            slot.verificationRequired = true;
+            slot.verificationUrl = snapshot.verificationUrl ?? slot.verificationUrl;
+        }
+        else if (snapshot.status === 'ok') {
+            slot.verificationRequired = false;
+            slot.verificationUrl = undefined;
+        }
+        if (snapshot.tosSuspended === true) {
+            this.health.recordTosSuspended(slot.layout.id, {
+                ...(slot.email !== undefined ? { email: slot.email } : {}),
+                error: snapshot.error ?? 'Terms of Service suspension',
+                ...(snapshot.tosAppealUrl !== undefined ? { appealUrl: snapshot.tosAppealUrl } : {}),
+            });
+        }
+        else if (snapshot.status === 'ok' && snapshot.subscriptionTier !== undefined) {
+            const modelCount = snapshot.availableModels?.length ?? slot.availableModels?.length ?? 0;
+            this.health.observeSubscription(slot.layout.id, {
+                ...(slot.email !== undefined ? { email: slot.email } : {}),
+                tier: snapshot.subscriptionTier,
+                ...(snapshot.subscriptionName !== undefined ? { subscriptionName: snapshot.subscriptionName } : {}),
+                modelCount,
+            });
+        }
+    }
     applyQuotaToSlot(slot, snapshot) {
+        this.noteQuotaHealth(slot, snapshot);
         if (snapshot.subscriptionTier !== undefined)
             slot.subscriptionTier = snapshot.subscriptionTier;
         if (snapshot.subscriptionName !== undefined)
@@ -398,7 +497,9 @@ export class AntigravityRuntime {
         const effortsByModel = {};
         const maxTokensByModel = {};
         for (const slot of this.slots.values()) {
-            if (!slot.layout.enabled || slot.availableModels === undefined || slot.availableModels.length === 0)
+            if (!slot.layout.enabled)
+                continue;
+            if (slot.availableModels === undefined || slot.availableModels.length === 0)
                 continue;
             inventories.push(slot.availableModels);
             for (const [id, efforts] of Object.entries(slot.effortsByModel ?? {})) {
@@ -436,18 +537,32 @@ export class AntigravityRuntime {
         }
     }
     /**
-     * Read the stored email and upstream Cloud Code tier/catalog/quota of every
-     * configured account so newly added or restarted slots display their real
-     * subscription tier and entitled models immediately.
+     * Read the stored email, refresh-token presence, and upstream Cloud Code
+     * tier/catalog/quota of configured accounts.
+     * @param _fetchAll - reserved for callers requesting explicit inspection of every account.
      */
-    async refreshAccountEmails() {
+    async refreshAccountEmails(_fetchAll = false) {
+        const epoch = this.identityEpoch;
         await Promise.all([...this.slots.values()].map(async (slot) => {
-            const email = await readAccountEmail(slot.layout, this.host.runCommand).catch(() => undefined);
-            slot.email = email;
-            if (email !== undefined && email.length > 0) {
-                const snap = await this.quota.readFor(slot.layout.id, slot.env, false, slot.layout).catch(() => undefined);
-                if (snap !== undefined && snap.status === 'ok') {
-                    this.applyQuotaToSlot(slot, snap);
+            const credOpts = this.credentialOptionsFor(slot);
+            const identity = await readAccountIdentity(slot.layout, this.host.runCommand, this.platform, credOpts).catch(() => ({
+                email: undefined,
+                hasRefreshToken: false,
+                raw: undefined,
+            }));
+            if (this.identityEpoch !== epoch)
+                return;
+            slot.email = identity.email;
+            slot.hasRefreshToken = identity.hasRefreshToken;
+            if (identity.email !== undefined && identity.email.length > 0) {
+                const snap = await this.quota.readFor(slot.layout.id, slot.env, false, slot.layout, credOpts).catch(() => undefined);
+                if (this.identityEpoch !== epoch)
+                    return;
+                if (snap !== undefined) {
+                    this.noteQuotaHealth(slot, snap);
+                    if (snap.status === 'ok') {
+                        this.applyQuotaToSlot(slot, snap);
+                    }
                 }
             }
         }));
@@ -475,6 +590,8 @@ export class AntigravityRuntime {
     status() {
         const preflight = this.primaryPreflight();
         const sessionHealth = this.collectSessionHealth();
+        const sessionAccounts = this.collectSessionAccounts();
+        const pinnedSessions = this.collectPinnedSessions();
         return {
             displayName: this.displayName(),
             modelDisplayNames: this.modelDisplayNames(),
@@ -499,10 +616,36 @@ export class AntigravityRuntime {
             liveSessions: [...this.conversations.values()].filter(c => c.sessionId !== undefined).length,
             activeTurns: [...this.conversations.values()].filter(c => c.turn !== undefined && !c.turn.finished).length,
             accounts: this.accounts(),
+            platform: this.platform,
+            multiAccountMode: 'concurrent',
+            ...this.activeAccountId !== undefined ? { activeAccountId: this.activeAccountId } : {},
+            ...Object.keys(sessionAccounts).length > 0 ? { sessionAccounts } : {},
+            ...Object.keys(pinnedSessions).length > 0 ? { pinnedSessions } : {},
             ...this.lastAccount !== undefined ? { lastAccount: this.lastAccount } : {},
             ...this.lastTurn !== undefined ? { lastTurn: this.lastTurn } : {},
             ...Object.keys(sessionHealth).length > 0 ? { sessionHealth } : {},
         };
+    }
+    collectSessionAccounts() {
+        const out = {};
+        for (const conv of this.conversations.values()) {
+            if (conv.purpose === MAIN_PURPOSE && conv.dshSessionId !== undefined && conv.accountId !== undefined && this.slots.has(conv.accountId)) {
+                out[conv.dshSessionId] = conv.accountId;
+            }
+        }
+        for (const [sid, entry] of this.sessionAccountPins.entries()) {
+            if (this.slots.has(entry.accountId))
+                out[sid] = entry.accountId;
+        }
+        return out;
+    }
+    collectPinnedSessions() {
+        const out = {};
+        for (const [sid, entry] of this.sessionAccountPins.entries()) {
+            if (this.slots.has(entry.accountId))
+                out[sid] = entry.accountId;
+        }
+        return out;
     }
     /**
      * Read the live shadow-degradation health snapshot of one DSH session.
@@ -531,7 +674,7 @@ export class AntigravityRuntime {
      * @returns the quota snapshot.
      */
     async quotaFor(accountId, force = false) {
-        const id = accountId ?? this.lastAccount ?? SYSTEM_ACCOUNT_ID;
+        const id = accountId ?? this.lastAccount ?? this.activeAccountId ?? SYSTEM_ACCOUNT_ID;
         const slot = this.slots.get(id);
         if (this.binary === undefined) {
             const target = slot ?? this.slots.get(SYSTEM_ACCOUNT_ID) ?? [...this.slots.values()][0];
@@ -540,12 +683,33 @@ export class AntigravityRuntime {
         }
         if (slot === undefined)
             return this.quota.read(force);
-        if (!slot.layout.system && process.platform === 'darwin')
+        if (!slot.layout.system && this.platform === 'darwin')
             await unlockAccountKeychain(slot.layout, this.host.runCommand);
-        const snapshot = await this.quota.readFor(id, slot.env, force, slot.layout);
+        const credOpts = this.credentialOptionsFor(slot);
+        const snapshot = await this.quota.readFor(id, slot.env, force, slot.layout, credOpts);
+        this.noteQuotaHealth(slot, snapshot);
         if (snapshot.status === 'ok')
             this.applyQuotaToSlot(slot, snapshot);
-        return snapshot;
+        return this.decorateQuotaHealth(id, snapshot);
+    }
+    decorateQuotaHealth(accountId, snapshot) {
+        const slot = this.slots.get(accountId);
+        const rec = this.health.get(accountId);
+        const downgradeAlert = rec?.downgradeAlert !== undefined && rec.downgradeAlert.acknowledged !== true
+            ? rec.downgradeAlert
+            : undefined;
+        return {
+            ...snapshot,
+            ...(slot?.verificationRequired === true ? {
+                verificationRequired: true,
+                ...(slot.verificationUrl !== undefined ? { verificationUrl: slot.verificationUrl } : {}),
+            } : {}),
+            ...(rec?.tosSuspended === true ? {
+                tosSuspended: true,
+                tosAppealUrl: rec.tosAppealUrl ?? DEFAULT_TOS_APPEAL_URL,
+            } : {}),
+            ...(downgradeAlert !== undefined ? { downgradeAlert } : {}),
+        };
     }
     /**
      * Plan quota of the account that serves one model right now.
@@ -615,12 +779,21 @@ export class AntigravityRuntime {
      * @returns the account layout, or undefined when no account serves the model.
      */
     accountForModel(model, sessionId) {
+        // Explicit per-session pin always owns this conversation's quota pill so the
+        // user sees that exact account's numbers (and truthful entitlement notice if
+        // the pinned account does not offer the currently chosen model).
+        const pinnedId = sessionId !== undefined ? this.sessionAccountPins.get(sessionId)?.accountId : undefined;
+        if (pinnedId !== undefined) {
+            const pinnedSlot = this.slots.get(pinnedId);
+            if (pinnedSlot !== undefined)
+                return pinnedSlot.layout;
+        }
         const family = familyForModel(model);
         const now = Date.now();
         // The session that already ran keeps its account, so the number belongs to
         // the subscription this conversation actually spends; a fresh conversation
-        // follows the pool's own pick.
-        const sticky = this.sessionAccount(sessionId) ?? this.lastAccount;
+        // follows the global default (when set) or the pool's own pick.
+        const sticky = this.sessionAccount(sessionId) ?? this.activeAccountId ?? this.lastAccount;
         // Attribution first: an account whose own announced catalog omits the model
         // cannot spend it, even before any other account has announced it — the
         // state right after a restart, or before the first warm-up. Scheduling stays
@@ -637,18 +810,24 @@ export class AntigravityRuntime {
         return this.pool.list().find(layout => layout.enabled && this.servesModel(layout.id, model));
     }
     /**
-     * Account bound to the main conversation of one DSH session, when it has
-     * already run a step.
+     * Account bound to the main conversation of one DSH session (explicit pin,
+     * live conversation binding, or persisted session index).
      * @param sessionId - DSH session id.
-     * @returns the account key, or undefined before the first step.
+     * @returns the account key, or undefined when unbound.
      */
     sessionAccount(sessionId) {
         if (sessionId === undefined || sessionId.length === 0)
             return undefined;
+        const pinned = this.sessionAccountPins.get(sessionId)?.accountId;
+        if (pinned !== undefined && this.slots.has(pinned))
+            return pinned;
         for (const conv of this.conversations.values()) {
             if (conv.dshSessionId === sessionId && conv.purpose === MAIN_PURPOSE && conv.accountId !== undefined)
                 return conv.accountId;
         }
+        const persisted = this.sessions.get(sessionId)?.accountId;
+        if (persisted !== undefined && this.slots.has(persisted))
+            return persisted;
         return undefined;
     }
     /**
@@ -698,6 +877,33 @@ export class AntigravityRuntime {
                 name: m.name,
                 enabled: isListedModel(m.id, ownAllow),
             }));
+            const healthRec = this.health.get(layout.id);
+            const activeFlag = this.activeAccountId !== undefined
+                ? layout.id === this.activeAccountId
+                : undefined;
+            const cachedQuota = this.quota.peekFor(layout.id);
+            let quotaSummary;
+            if (cachedQuota?.status === 'ok' && cachedQuota.groups.length > 0) {
+                const pickWeekly = (kind) => {
+                    const g = cachedQuota.groups.find(entry => entry.kind === kind);
+                    if (g === undefined)
+                        return undefined;
+                    const b = g.buckets.find(item => isWeeklyBucket(item) && !item.disabled) ?? g.buckets.find(item => !item.disabled);
+                    return b !== undefined && Number.isFinite(b.remainingFraction) ? b.remainingFraction : undefined;
+                };
+                const gemini = pickWeekly('gemini');
+                const claude = pickWeekly('claude');
+                const argon = pickWeekly('argon');
+                const primary = gemini ?? claude ?? argon;
+                if (primary !== undefined || gemini !== undefined || claude !== undefined || argon !== undefined) {
+                    quotaSummary = {
+                        ...(gemini !== undefined ? { gemini } : {}),
+                        ...(claude !== undefined ? { claude } : {}),
+                        ...(argon !== undefined ? { argon } : {}),
+                        ...(primary !== undefined ? { primary } : {}),
+                    };
+                }
+            }
             return {
                 id: layout.id,
                 label: layout.label,
@@ -712,7 +918,26 @@ export class AntigravityRuntime {
                 error: slot?.error ?? undefined,
                 cooldowns: this.pool.cooldowns(layout.id),
                 sessions: sessions.get(layout.id) ?? 0,
-                email: slot?.email ?? undefined,
+                email: slot?.email ?? healthRec?.email ?? undefined,
+                ...(activeFlag !== undefined ? { active: activeFlag } : {}),
+                ...(slot?.hasRefreshToken === true ? { hasRefreshToken: true } : {}),
+                ...(quotaSummary !== undefined ? { quotaSummary } : {}),
+                ...(slot?.verificationRequired === true ? {
+                    verificationRequired: true,
+                    ...(slot.verificationUrl !== undefined ? { verificationUrl: slot.verificationUrl } : {}),
+                } : {}),
+                ...(healthRec?.tosSuspended === true ? {
+                    tosSuspended: true,
+                    ...(healthRec.tosSuspendedAt !== undefined ? { tosSuspendedAt: healthRec.tosSuspendedAt } : {}),
+                    tosAppealUrl: healthRec.tosAppealUrl ?? DEFAULT_TOS_APPEAL_URL,
+                    ...(healthRec.tosError !== undefined ? { tosError: healthRec.tosError } : {}),
+                } : {}),
+                ...(healthRec?.downgradeAlert !== undefined && healthRec.downgradeAlert.acknowledged !== true
+                    ? { downgradeAlert: healthRec.downgradeAlert }
+                    : {}),
+                ...(healthRec !== undefined && healthRec.tierHistory.length > 0
+                    ? { tierHistory: healthRec.tierHistory }
+                    : {}),
                 ...(slot?.subscriptionTier !== undefined ? { subscriptionTier: slot.subscriptionTier } : {}),
                 ...(slot?.subscriptionName !== undefined ? { subscriptionName: slot.subscriptionName } : {}),
                 availableModels: accountAvailable,
@@ -940,7 +1165,14 @@ export class AntigravityRuntime {
                         liveByAccount.set(c.accountId, (liveByAccount.get(c.accountId) ?? 0) + 1);
                     }
                 }
-                const layout = this.pool.choose(family, conv.accountId, now, candidate => !attempted.has(candidate.id) && this.slotCanServeModel(candidate.id, options.model, now), id => liveByAccount.get(id) ?? 0);
+                const pinnedId = options.sessionId !== undefined
+                    ? this.sessionAccountPins.get(options.sessionId)?.accountId
+                    : undefined;
+                const sticky = (pinnedId !== undefined && this.slots.has(pinnedId) ? pinnedId : undefined)
+                    ?? conv.accountId
+                    ?? this.activeAccountId;
+                const layout = this.pool.choose(family, sticky, now, candidate => !attempted.has(candidate.id)
+                    && this.slotCanServeModel(candidate.id, options.model, now), id => liveByAccount.get(id) ?? 0);
                 if (layout === undefined)
                     throw this.poolExhausted(family, attempted, options.model, cooldownKey);
                 const slot = this.slotFor(layout.id);
@@ -1425,15 +1657,23 @@ export class AntigravityRuntime {
     }
     createConversation(key, purpose, dshSessionId) {
         const cleanDshId = dshSessionId !== undefined && dshSessionId.length > 0 ? dshSessionId : undefined;
+        const pinnedAccount = cleanDshId !== undefined
+            ? this.sessionAccountPins.get(cleanDshId)?.accountId
+            : undefined;
         const persistedAccount = purpose === MAIN_PURPOSE && cleanDshId !== undefined
             ? this.sessions.get(cleanDshId)?.accountId
             : undefined;
+        const initialAccount = pinnedAccount !== undefined && this.slots.has(pinnedAccount)
+            ? pinnedAccount
+            : persistedAccount !== undefined && this.slots.has(persistedAccount)
+                ? persistedAccount
+                : undefined;
         const conv = {
             key,
             dshSessionId: cleanDshId,
             purpose,
             tag: randomBytes(3).toString('hex'),
-            accountId: persistedAccount !== undefined && this.slots.has(persistedAccount) ? persistedAccount : undefined,
+            accountId: initialAccount,
             tenantKey: undefined,
             tenantSecret: undefined,
             sessionId: undefined,
@@ -1534,8 +1774,13 @@ export class AntigravityRuntime {
             const unlock = await checkUnlock(binary, script, config.autoPatch, this.host.runCommand);
             this.host.log.info(`antigravity-acp: [${slot.layout.id}] ${unlock.detail}`);
             await ensureLayout(slot.layout, this.host.runCommand);
-            const email = await readAccountEmail(slot.layout, this.host.runCommand).catch(() => undefined);
-            slot.email = email;
+            const identity = await readAccountIdentity(slot.layout, this.host.runCommand, this.platform, this.credentialOptionsFor(slot)).catch(() => ({
+                email: undefined,
+                hasRefreshToken: false,
+                raw: undefined,
+            }));
+            slot.email = identity.email;
+            slot.hasRefreshToken = identity.hasRefreshToken;
             const result = {
                 binary,
                 version,
@@ -1956,8 +2201,10 @@ export class AntigravityRuntime {
             conv.turn = undefined;
             conv.dirty = true;
             this.sessions.forget(conv.dshSessionId);
+            this.observeRuntimeFailure(slot, error);
             throw mapError(error);
         }
+        this.observeRuntimeSuccess(slot);
         if (finishKind === 'tool-calls') {
             conv.knownIds = ctx.nextKnownIds;
             return;
@@ -2299,6 +2546,382 @@ export class AntigravityRuntime {
             slot.state = 'idle';
         }
     }
+    observeRuntimeFailure(slot, error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        if (isVerificationText(msg)) {
+            slot.verificationRequired = true;
+            const link = /https:\/\/accounts\.google\.com\/[^\s"'<>\\]+/.exec(msg);
+            if (link !== null)
+                slot.verificationUrl = link[0];
+            void this.quotaFor(slot.layout.id, true).catch(() => undefined);
+            return;
+        }
+        if (isTosSuspensionText(msg)) {
+            this.health.recordTosSuspended(slot.layout.id, {
+                ...(slot.email !== undefined ? { email: slot.email } : {}),
+                error: msg,
+            });
+        }
+    }
+    observeRuntimeSuccess(slot) {
+        if (slot.verificationRequired) {
+            slot.verificationRequired = false;
+            slot.verificationUrl = undefined;
+        }
+        this.health.clearTosSuspended(slot.layout.id);
+    }
+    async saveCurrentWinCredToOwningSlot() {
+        if (this.platform !== 'win32')
+            return {};
+        const currentRaw = await readWindowsCredential(this.host.runCommand).catch(() => undefined);
+        if (currentRaw === undefined)
+            return {};
+        const parsed = parseOAuthBlob(currentRaw);
+        if (parsed === undefined || !parsed.hasRefreshToken)
+            return { raw: currentRaw };
+        const emailLower = parsed.email?.toLowerCase();
+        let owner;
+        if (emailLower !== undefined) {
+            for (const slot of this.slots.values()) {
+                if (slot.email?.toLowerCase() === emailLower) {
+                    owner = slot;
+                    break;
+                }
+            }
+            if (owner === undefined) {
+                for (const slot of this.slots.values()) {
+                    const existing = readStoredCredentialFileRaw(slot.layout.appDir);
+                    const existingEmail = existing !== undefined ? parseOAuthBlob(existing)?.email?.toLowerCase() : undefined;
+                    if (existingEmail === emailLower) {
+                        owner = slot;
+                        break;
+                    }
+                }
+            }
+        }
+        if (owner === undefined && this.activeAccountId !== undefined) {
+            owner = this.slots.get(this.activeAccountId);
+        }
+        if (owner === undefined) {
+            owner = [...this.slots.values()].find(s => s.layout.system);
+        }
+        if (owner !== undefined) {
+            // Never overwrite another account's saved permanent token if emails conflict.
+            const existing = readStoredCredentialFileRaw(owner.layout.appDir);
+            const existingEmail = existing !== undefined ? parseOAuthBlob(existing)?.email?.toLowerCase() : undefined;
+            if (existingEmail === undefined || emailLower === undefined || existingEmail === emailLower) {
+                try {
+                    writeSlotCredentialFile(owner.layout, parsed.rawJson, true);
+                    owner.email = parsed.email ?? owner.email;
+                    owner.hasRefreshToken = true;
+                }
+                catch {
+                    // Best-effort backup.
+                }
+            }
+        }
+        return { raw: parsed.rawJson, ...(parsed.email !== undefined ? { email: parsed.email } : {}) };
+    }
+    hasActiveTurnForSession(sessionId) {
+        for (const conv of this.conversations.values()) {
+            if (conv.dshSessionId === sessionId && conv.turn !== undefined && !conv.turn.finished)
+                return true;
+        }
+        return false;
+    }
+    /**
+     * Bind one DSH conversation/session to a specific account (or unpin it back
+     * to automatic scheduling), without disturbing any other open session or
+     * restarting any other account's `agy acp` process.
+     *
+     * When `options.sessionId` is omitted, updates the global default preferred
+     * account for brand-new unpinned conversations instead.
+     * @param accountId - target account id (ignored when `options.clear === true`).
+     * @param options - optional per-session target and clear flag.
+     * @returns updated runtime status.
+     */
+    async switchActiveAccount(accountId, options = {}) {
+        const sessionId = options.sessionId !== undefined && options.sessionId.trim().length > 0
+            ? options.sessionId.trim()
+            : undefined;
+        if (sessionId !== undefined) {
+            const release = await this.switchMutex.acquire(`session:${sessionId}`);
+            try {
+                if (this.hasActiveTurnForSession(sessionId)) {
+                    throw new Error('antigravity-acp: 当前会话正在生成回复，请等待本轮回复结束后再切换账号。');
+                }
+                if (options.clear === true) {
+                    this.sessionAccountPins.delete(sessionId);
+                    writeSessionAccountPins(this.sessionAccountsFile, this.sessionAccountPins);
+                    return this.status();
+                }
+                if (accountId === undefined || accountId.trim().length === 0) {
+                    throw new Error('antigravity-acp: 请选择要切换的目标账号。');
+                }
+                let target = this.slotFor(accountId);
+                if (target.email === undefined && !target.hasRefreshToken) {
+                    const identity = await readAccountIdentity(target.layout, this.host.runCommand, this.platform, this.credentialOptionsFor(target)).catch(() => ({ email: undefined, hasRefreshToken: false, raw: undefined }));
+                    target.email = identity.email;
+                    target.hasRefreshToken = identity.hasRefreshToken;
+                    if (identity.email === undefined && !identity.hasRefreshToken) {
+                        throw new Error(`antigravity-acp: 账号 "${accountId}" 尚未登录或未保存凭据，请先在设置中登录或导入凭据。`);
+                    }
+                }
+                if (!target.layout.enabled) {
+                    const enabledProfiles = this.pool.list().map(layout => ({
+                        ...accountProfileOf(layout),
+                        ...(layout.id === target.layout.id ? { enabled: true } : {}),
+                    }));
+                    this.configure({ accounts: enabledProfiles });
+                    target = this.slotFor(accountId);
+                }
+                this.sessionAccountPins.set(sessionId, { accountId: target.layout.id, updatedAt: Date.now() });
+                writeSessionAccountPins(this.sessionAccountsFile, this.sessionAccountPins);
+                // Reset only this session's old ACP session if it was bound to a different
+                // account, leaving every other conversation and ACP front process untouched.
+                for (const conv of this.conversations.values()) {
+                    if (conv.dshSessionId !== sessionId)
+                        continue;
+                    if (conv.accountId !== target.layout.id) {
+                        await this.resetSession(conv, true);
+                        conv.accountId = target.layout.id;
+                        conv.dirty = true;
+                    }
+                }
+                const persisted = this.sessions.get(sessionId);
+                if (persisted !== undefined && persisted.accountId !== target.layout.id) {
+                    this.sessions.forget(sessionId);
+                }
+                if (this.quota.peekFor(target.layout.id) === undefined) {
+                    await this.quotaFor(target.layout.id, false).catch(() => undefined);
+                }
+                if (this.recomputeUnionCatalog())
+                    this.host.onModelsChanged();
+                return this.status();
+            }
+            finally {
+                release();
+            }
+        }
+        // Global default account selection (for new unpinned conversations).
+        if (accountId === undefined || accountId.trim().length === 0) {
+            throw new Error('antigravity-acp: 请选择要设为默认的账号。');
+        }
+        const release = await this.switchMutex.acquire('global-default');
+        try {
+            let target = this.slotFor(accountId);
+            if (target.email === undefined && !target.hasRefreshToken) {
+                const identity = await readAccountIdentity(target.layout, this.host.runCommand, this.platform, this.credentialOptionsFor(target)).catch(() => ({ email: undefined, hasRefreshToken: false, raw: undefined }));
+                target.email = identity.email;
+                target.hasRefreshToken = identity.hasRefreshToken;
+                if (identity.email === undefined && !identity.hasRefreshToken) {
+                    throw new Error(`antigravity-acp: 账号 "${accountId}" 尚未登录或未保存凭据，请先在设置中登录或导入凭据。`);
+                }
+            }
+            if (!target.layout.enabled) {
+                const enabledProfiles = this.pool.list().map(layout => ({
+                    ...accountProfileOf(layout),
+                    ...(layout.id === target.layout.id ? { enabled: true } : {}),
+                }));
+                this.configure({ accounts: enabledProfiles });
+                target = this.slotFor(accountId);
+            }
+            this.activeAccountId = target.layout.id;
+            this.lastAccount = target.layout.id;
+            writeActiveAccountRecord(this.activeAccountFile, {
+                accountId: target.layout.id,
+                ...(target.email !== undefined ? { email: target.email } : {}),
+                switchedAt: new Date().toISOString(),
+            });
+            if (this.quota.peekFor(target.layout.id) === undefined) {
+                await this.quotaFor(target.layout.id, false).catch(() => undefined);
+            }
+            if (this.recomputeUnionCatalog())
+                this.host.onModelsChanged();
+            return this.status();
+        }
+        finally {
+            release();
+        }
+    }
+    /**
+     * Snapshot the currently signed-in Windows Credential Manager account into a
+     * dedicated permanent account slot (updating an existing matching email slot
+     * or adding a new slot).
+     * @param displayName - optional remark when creating a new slot.
+     * @returns result including the account id and updated runtime status.
+     */
+    async snapshotCurrentAccount(displayName) {
+        if (this.platform !== 'win32') {
+            throw new Error('antigravity-acp: snapshotCurrentAccount is intended for Windows Credential Manager.');
+        }
+        const raw = await readWindowsCredential(this.host.runCommand);
+        if (raw === undefined) {
+            throw new Error('antigravity-acp: Windows 凭据管理器中未找到已登录的 Antigravity 凭据。');
+        }
+        return this.importAccountCredential({
+            ...(displayName !== undefined ? { displayName } : {}),
+            content: raw,
+        });
+    }
+    /**
+     * Import a permanent OAuth credential backup (either raw JSON / `go-keyring-base64`,
+     * an `agy_cred.ps1` `{ blobBase64 }` backup JSON, or an existing local file path)
+     * into an isolated account slot without disrupting the currently active account.
+     * @param input - backup content or local file path, plus optional remark.
+     * @returns result including the matched/created account id and updated status.
+     */
+    async importAccountCredential(input) {
+        const trimmed = input.content.trim();
+        if (trimmed.length === 0) {
+            throw new Error('antigravity-acp: 凭据内容或文件路径不能为空。');
+        }
+        let payload = trimmed;
+        if (!trimmed.startsWith('{') && !trimmed.startsWith('go-keyring-base64:') && existsSync(trimmed)) {
+            try {
+                if (statSync(trimmed).isFile()) {
+                    payload = readFileSync(trimmed, 'utf8');
+                }
+            }
+            catch (error) {
+                throw new Error(`antigravity-acp: 无法读取凭据文件 "${trimmed}": ${error instanceof Error ? error.message : String(error)}`);
+            }
+        }
+        const parsed = parseImportedCredential(payload);
+        if (parsed === undefined) {
+            throw new Error('antigravity-acp: 无法解析凭据内容，请提供有效的 OAuth JSON 或 agy_cred.ps1 备份文件。');
+        }
+        if (!parsed.hasRefreshToken) {
+            throw new Error('antigravity-acp: 该凭据缺少永久 refresh_token，为避免很快过期，已拒绝导入。');
+        }
+        const email = parsed.email ?? 'unknown@account';
+        const emailLower = parsed.email?.toLowerCase();
+        // Reuse existing slot if the same email is already configured.
+        let existingSlot;
+        if (emailLower !== undefined) {
+            for (const slot of this.slots.values()) {
+                if (slot.email?.toLowerCase() === emailLower) {
+                    existingSlot = slot;
+                    break;
+                }
+                const fileRaw = readStoredCredentialFileRaw(slot.layout.appDir);
+                const fileEmail = fileRaw !== undefined ? parseOAuthBlob(fileRaw)?.email?.toLowerCase() : undefined;
+                if (fileEmail === emailLower) {
+                    existingSlot = slot;
+                    break;
+                }
+            }
+        }
+        let created = false;
+        let targetSlot = existingSlot;
+        if (targetSlot === undefined) {
+            const currentProfiles = this.pool.list().map(layout => accountProfileOf(layout));
+            const remark = (input.displayName ?? '').trim() || (parsed.email ? parsed.email.split('@')[0] ?? '' : '');
+            const nextProfiles = [
+                ...currentProfiles,
+                {
+                    id: '',
+                    displayName: remark,
+                    home: '',
+                    enabled: true,
+                    env: {},
+                    contextWindow: 0,
+                    visibleModels: [],
+                    priority: 1,
+                    weight: 1,
+                },
+            ];
+            const status = this.configure({ accounts: nextProfiles });
+            const added = status.accounts.at(-1);
+            if (added === undefined)
+                throw new Error('antigravity-acp: failed to create account slot for imported credential');
+            targetSlot = this.slotFor(added.id);
+            created = true;
+        }
+        await ensureLayout(targetSlot.layout, this.host.runCommand);
+        this.identityEpoch += 1;
+        writeSlotCredentialFile(targetSlot.layout, parsed.rawJson, true);
+        targetSlot.email = parsed.email ?? targetSlot.email;
+        targetSlot.hasRefreshToken = true;
+        this.quota.clearAccount(targetSlot.layout.id);
+        await this.quotaFor(targetSlot.layout.id, true).catch(() => undefined);
+        if (this.recomputeUnionCatalog())
+            this.host.onModelsChanged();
+        return {
+            accountId: targetSlot.layout.id,
+            email,
+            created,
+            hasRefreshToken: parsed.hasRefreshToken,
+            status: this.status(),
+        };
+    }
+    /**
+     * Manually recheck one account's verification status, ToS status, and live quota.
+     * For a ToS-suspended active account, runs one lightweight probe only when the
+     * user explicitly clicks recheck (never polled in the background).
+     * @param accountId - account id to recheck.
+     * @returns updated status and quota snapshot.
+     */
+    async recheckAccount(accountId) {
+        const slot = this.slotFor(accountId);
+        this.quota.clearAccount(accountId);
+        if (!slot.layout.system && this.platform === 'darwin')
+            await unlockAccountKeychain(slot.layout, this.host.runCommand);
+        const credOpts = this.credentialOptionsFor(slot);
+        const rawSnap = await this.quota.readFor(accountId, slot.env, true, slot.layout, credOpts);
+        this.noteQuotaHealth(slot, rawSnap);
+        if (rawSnap.status === 'ok')
+            this.applyQuotaToSlot(slot, rawSnap);
+        const rec = this.health.get(accountId);
+        if (rec?.tosSuspended === true
+            && rawSnap.status === 'ok'
+            && rawSnap.verificationRequired !== true
+            && rawSnap.tosSuspended !== true) {
+            // ToS-suspended accounts still return 200 on `/usage` & `loadCodeAssist`;
+            // verify live generation once only on explicit user recheck.
+            const binary = this.binary ?? (() => { try {
+                return resolveAgyBinary(this.host.config.command);
+            }
+            catch {
+                return undefined;
+            } })();
+            if (binary !== undefined) {
+                this.binary = binary;
+                const probe = await this.host.runCommand([binary, '-p', 'Reply with OK', '--model', 'gemini-3.8-flash'], 35_000, slot.env).catch(() => undefined);
+                if (probe !== undefined) {
+                    const combined = `${probe.stdout}\n${probe.stderr}`;
+                    if (isTosSuspensionText(combined)) {
+                        this.health.recordTosSuspended(accountId, {
+                            ...(slot.email !== undefined ? { email: slot.email } : {}),
+                            error: combined.trim().slice(0, 300),
+                        });
+                    }
+                    else if (isVerificationText(combined)) {
+                        slot.verificationRequired = true;
+                        const link = /https:\/\/accounts\.google\.com\/[^\s"'<>\\]+/.exec(combined);
+                        if (link !== null)
+                            slot.verificationUrl = link[0];
+                    }
+                    else if (probe.code === 0 && probe.stdout.trim().length > 0) {
+                        this.health.clearTosSuspended(accountId);
+                    }
+                }
+            }
+        }
+        return {
+            status: this.status(),
+            quota: this.decorateQuotaHealth(accountId, rawSnap),
+        };
+    }
+    /**
+     * Dismiss an account's downgrade alert banner while keeping its tier history.
+     * @param accountId - account id.
+     * @returns updated runtime status.
+     */
+    acknowledgeDowngrade(accountId) {
+        this.health.acknowledgeDowngrade(accountId);
+        return this.status();
+    }
     /**
      * Prepare an account sandbox and start an interactive sign-in.
      * @param accountId - account to sign in.
@@ -2309,10 +2932,23 @@ export class AntigravityRuntime {
         const binary = this.binary ?? resolveAgyBinary(this.host.config.command);
         this.binary = binary;
         await ensureLayout(slot.layout, this.host.runCommand);
+        // On Windows, only the machine (`system: true`) slot touches Windows
+        // Credential Manager; snapshot it beforehand so cancel/failure restores it.
+        // Non-system Windows slots run under `WSL_INTEROP` + isolated `USERPROFILE`
+        // and write straight to `<appDir>/antigravity-oauth-token` without touching WinCred.
+        let previousWinCred;
+        const previousActiveAccountId = this.activeAccountId;
+        if (this.platform === 'win32' && slot.layout.system) {
+            const saved = await this.saveCurrentWinCredToOwningSlot();
+            previousWinCred = saved.raw;
+        }
         const command = loginCommand(slot.layout, binary);
         this.logins.get(accountId)?.child.terminate();
         this.logins.delete(accountId);
-        const child = this.host.spawnAcp([binary, 'acp', '--login'], slot.layout.workspace, slot.env);
+        const argv = this.platform === 'win32' && !slot.layout.system
+            ? [binary, 'acp', '--gemini-dir', slot.layout.geminiDir, '--app-data-dir', 'agy', '--login']
+            : [binary, 'acp', '--login'];
+        const child = this.host.spawnAcp(argv, slot.layout.workspace, slot.env);
         const url = await readLoginUrl(child, 45_000);
         if (url.length === 0) {
             child.terminate();
@@ -2320,7 +2956,12 @@ export class AntigravityRuntime {
         }
         void child.exited.then(() => { if (this.logins.get(accountId)?.child === child)
             this.logins.delete(accountId); });
-        this.logins.set(accountId, { child, url });
+        this.logins.set(accountId, {
+            child,
+            url,
+            ...(previousWinCred !== undefined ? { previousWinCred } : {}),
+            ...(previousActiveAccountId !== undefined ? { previousActiveAccountId } : {}),
+        });
         return { accountId, url, command };
     }
     /**
@@ -2340,12 +2981,81 @@ export class AntigravityRuntime {
             this.logins.delete(accountId);
         if (outcome === 'timeout') {
             session.child.terminate();
+            if (this.platform === 'win32' && slot.layout.system && session.previousWinCred !== undefined) {
+                await writeWindowsCredential(this.host.runCommand, session.previousWinCred, { requireRefreshToken: false }).catch(() => undefined);
+            }
             return { ok: false, email: undefined, error: 'The sign-in did not finish within 120 seconds.' };
         }
-        let email = await readAccountEmail(slot.layout, this.host.runCommand).catch(() => undefined);
+        if (this.platform === 'win32' && slot.layout.system) {
+            if (outcome.code !== 0) {
+                if (session.previousWinCred !== undefined) {
+                    await writeWindowsCredential(this.host.runCommand, session.previousWinCred, { requireRefreshToken: false }).catch(() => undefined);
+                }
+                return { ok: false, email: undefined, error: `agy exited with code ${String(outcome.code)} ${session.child.stderrTail()}`.trim() };
+            }
+            // Capture the freshly written WinCred blob into the system slot's backup file.
+            let freshRaw;
+            for (let attempt = 0; freshRaw === undefined && attempt < 4; attempt++) {
+                freshRaw = await readWindowsCredential(this.host.runCommand).catch(() => undefined);
+                if (freshRaw === undefined)
+                    await delay(150);
+            }
+            const parsed = freshRaw !== undefined ? parseOAuthBlob(freshRaw) : undefined;
+            if (parsed !== undefined) {
+                this.identityEpoch += 1;
+                writeSlotCredentialFile(slot.layout, parsed.rawJson, true);
+                slot.email = parsed.email;
+                slot.hasRefreshToken = parsed.hasRefreshToken;
+                if (slot.process !== undefined || slot.starting !== undefined) {
+                    this.stopSlotProcess(slot, `Signed in account "${accountId}"; restarting ACP front.`);
+                }
+                this.quota.clearAccount(slot.layout.id);
+                await this.quotaFor(slot.layout.id, true).catch(() => undefined);
+                if (this.recomputeUnionCatalog())
+                    this.host.onModelsChanged();
+                return { ok: true, email: parsed.email, error: undefined };
+            }
+        }
+        if (this.platform === 'win32' && !slot.layout.system) {
+            if (outcome.code !== 0) {
+                return { ok: false, email: undefined, error: `agy exited with code ${String(outcome.code)} ${session.child.stderrTail()}`.trim() };
+            }
+            // Mirror freshly written isolated token between `<appDir>` and `<homeDir>/.gemini/antigravity-cli`.
+            syncOAuthToken(slot.layout.geminiDir, slot.layout.homeDir);
+            let identity = await readAccountIdentity(slot.layout, this.host.runCommand, this.platform, this.credentialOptionsFor(slot)).catch(() => ({
+                email: undefined,
+                hasRefreshToken: false,
+                raw: undefined,
+            }));
+            for (let attempt = 0; identity.raw === undefined && attempt < 4; attempt++) {
+                await delay(150);
+                syncOAuthToken(slot.layout.geminiDir, slot.layout.homeDir);
+                identity = await readAccountIdentity(slot.layout, this.host.runCommand, this.platform, this.credentialOptionsFor(slot)).catch(() => ({
+                    email: undefined,
+                    hasRefreshToken: false,
+                    raw: undefined,
+                }));
+            }
+            const parsed = identity.raw !== undefined ? parseOAuthBlob(identity.raw) : undefined;
+            if (parsed !== undefined) {
+                this.identityEpoch += 1;
+                writeSlotCredentialFile(slot.layout, parsed.rawJson, true);
+                slot.email = parsed.email ?? identity.email;
+                slot.hasRefreshToken = parsed.hasRefreshToken;
+                if (slot.process !== undefined || slot.starting !== undefined) {
+                    this.stopSlotProcess(slot, `Signed in account "${accountId}"; restarting ACP front.`);
+                }
+                this.quota.clearAccount(slot.layout.id);
+                await this.quotaFor(slot.layout.id, true).catch(() => undefined);
+                if (this.recomputeUnionCatalog())
+                    this.host.onModelsChanged();
+                return { ok: true, email: slot.email, error: undefined };
+            }
+        }
+        let email = await readAccountEmail(slot.layout, this.host.runCommand, this.platform, this.credentialOptionsFor(slot)).catch(() => undefined);
         for (let attempt = 0; email === undefined && outcome.code === 0 && attempt < 3; attempt++) {
             await delay(150);
-            email = await readAccountEmail(slot.layout, this.host.runCommand).catch(() => undefined);
+            email = await readAccountEmail(slot.layout, this.host.runCommand, this.platform, this.credentialOptionsFor(slot)).catch(() => undefined);
         }
         slot.email = email;
         this.quota.clear();
@@ -2601,6 +3311,12 @@ export function mapError(error) {
     const message = error instanceof Error ? error.message : String(error);
     if (error instanceof JsonRpcClosedError)
         return new LlmError(labeled('TRANSPORT', `Antigravity ACP link closed: ${message}`), 'TRANSPORT', { cause: error });
+    if (isVerificationText(message)) {
+        return new LlmError(labeled('AUTH', `Antigravity 需要完成账号验证，请到插件设置页账号卡片点击「前往验证」：${message}`), 'AUTH', { cause: error });
+    }
+    if (isTosSuspensionText(message)) {
+        return new LlmError(labeled('AUTH', `当前 Antigravity 账号因服务条款（ToS）被停用，请切换其他账号或在设置页提交申诉：${message}`), 'AUTH', { cause: error });
+    }
     if (/authentication required|not logged in|unauthenticated|sign in/i.test(message)) {
         return new LlmError(labeled('AUTH', message), 'AUTH', { cause: error });
     }
