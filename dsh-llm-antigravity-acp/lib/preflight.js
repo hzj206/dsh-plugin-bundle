@@ -147,6 +147,7 @@ export function syncOAuthToken(home, userHome = homedir()) {
     const dst = join(appData, 'antigravity-oauth-token');
     const sources = [
         join(userHome, '.gemini', 'antigravity-cli', 'antigravity-oauth-token'),
+        join(userHome, '.gemini', 'agy', 'antigravity-oauth-token'),
         join(userHome, '.gemini', 'antigravity', 'antigravity-oauth-token'),
     ];
     let newestSrc;

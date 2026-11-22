@@ -65,7 +65,7 @@ export const Config = z.object({
     relayAfterMs: z.number().step(1).min(5_000).max(165_000).default(85_000),
     longDecodeContinuations: maybeVolatile(z.number().step(1).min(0).max(16).default(3)),
     warmup: z.boolean().default(true),
-    quotaTtlMs: z.number().step(1).min(5_000).default(120_000),
+    quotaTtlMs: z.number().step(1).min(5_000).default(300_000),
     degradeAction: maybeVolatile(z.union(DEGRADE_ACTIONS).default('truncation')),
     engineMode: maybeVolatile(z.union(ENGINE_MODES).default('bridge')),
     // The published schemastery declarations type `.volatile()` fields as plain values.

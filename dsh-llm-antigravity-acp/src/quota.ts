@@ -261,12 +261,19 @@ export function resolveModelQuota(snapshot: QuotaSnapshot, model: string): Model
     : { model, family, entitled: false, reason: 'no-groups' }
 }
 
+/** Cooldown applied to non-force retries after a transient Cloud Code error. */
+const TRANSIENT_ERROR_BACKOFF_MS = 60_000
+/** Longer cooldown applied to non-force retries after an auth / 403 account block. */
+const AUTH_ERROR_BACKOFF_MS = 5 * 60_000
+
 /**
- * Cached quota reader. Every account keeps its own cache entry and in-flight
- * request so one account's windows and entitlements never bleed into another.
+ * Cached quota reader. Every account keeps its own cache entry, error-backoff
+ * window, and in-flight request so one account's windows and entitlements never
+ * bleed into another and repeated non-force polls never storm upstream after an error.
  */
 export class QuotaReader {
   private readonly cached = new Map<string, { snapshot: QuotaSnapshot; at: number }>()
+  private readonly errorBackoff = new Map<string, { snapshot: QuotaSnapshot; until: number }>()
   private readonly inflight = new Map<string, Promise<QuotaSnapshot>>()
 
   /**
@@ -274,12 +281,16 @@ export class QuotaReader {
    * @param run - helper command runner.
    * @param ttlMs - cache lifetime.
    * @param transport - optional Cloud Code HTTP transport override for tests.
+   * @param errorBackoffMs - transient error backoff for non-force reads (default 60s).
+   * @param authErrorBackoffMs - auth/403 error backoff for non-force reads (default 5m).
    */
   constructor(
     private readonly binary: () => string | undefined,
     private readonly run: CommandRunner,
     private readonly ttlMs: number,
     private readonly transport?: CloudCodeTransport,
+    private readonly errorBackoffMs = TRANSIENT_ERROR_BACKOFF_MS,
+    private readonly authErrorBackoffMs = AUTH_ERROR_BACKOFF_MS,
   ) {}
 
   /**
@@ -295,8 +306,9 @@ export class QuotaReader {
    * Read the quota and entitlement snapshot of one account.
    * @param accountId - account the snapshot belongs to.
    * @param env - environment that selects that account's credential store.
-   * @param force - bypass the cache.
+   * @param force - bypass the cache and error backoff.
    * @param layout - optional account layout enabling direct Cloud Code inspection.
+   * @param credentialOptions - optional Windows credential routing options.
    * @returns the snapshot; failures resolve as `status: 'error'`.
    */
   async readFor(
@@ -306,8 +318,14 @@ export class QuotaReader {
     layout?: AccountLayout,
     credentialOptions?: ReadCredentialOptions,
   ): Promise<QuotaSnapshot> {
+    const now = Date.now()
     const hit = this.cached.get(accountId)
-    if (!force && hit !== undefined && Date.now() - hit.at < this.ttlMs) return hit.snapshot
+    if (!force && hit !== undefined && now - hit.at < this.ttlMs) return hit.snapshot
+    const backedOff = this.errorBackoff.get(accountId)
+    if (!force && backedOff !== undefined) {
+      if (now < backedOff.until) return backedOff.snapshot
+      this.errorBackoff.delete(accountId)
+    }
     const running = this.inflight.get(accountId)
     if (!force && running !== undefined) return running
     const pending = this.fetch(accountId, env, layout, credentialOptions).finally(() => {
@@ -326,14 +344,24 @@ export class QuotaReader {
     return this.readFor(SYSTEM_ACCOUNT_ID, {}, force)
   }
 
-  /** Forget every cached snapshot, for example after the account list changed. */
+  /** Forget every cached snapshot and error backoff, for example after the account list changed. */
   clear(): void {
     this.cached.clear()
+    this.errorBackoff.clear()
   }
 
-  /** Forget the cached snapshot of one account. */
+  /** Forget the cached snapshot and error backoff of one account. */
   clearAccount(accountId: string): void {
     this.cached.delete(accountId)
+    this.errorBackoff.delete(accountId)
+  }
+
+  private recordError(accountId: string, snapshot: QuotaSnapshot, isAuthFailure: boolean): QuotaSnapshot {
+    const duration = isAuthFailure ? this.authErrorBackoffMs : this.errorBackoffMs
+    if (duration > 0) {
+      this.errorBackoff.set(accountId, { snapshot, until: Date.now() + duration })
+    }
+    return snapshot
   }
 
   private async fetch(
@@ -365,58 +393,52 @@ export class QuotaReader {
             disabledModels: inspected.disabledModels,
             argonSharedWithGemini: inspected.argonSharedWithGemini,
           }
+          this.errorBackoff.delete(accountId)
           this.cached.set(accountId, { snapshot, at: Date.now() })
           return snapshot
         }
         if (!allowCliFallback) {
-          return {
+          return this.recordError(accountId, {
             status: 'error',
             updatedAt: new Date().toISOString(),
             groups: [],
             error: 'No saved credential found for this backup account.',
-          }
+          }, true)
         }
       } catch (cloudError) {
         if (cloudError instanceof VerificationRequiredError) {
-          return {
+          return this.recordError(accountId, {
             status: 'error',
             updatedAt: new Date().toISOString(),
             groups: this.cached.get(accountId)?.snapshot.groups ?? [],
             error: cloudError.message,
             verificationRequired: true,
             ...(cloudError.verificationUrl !== undefined ? { verificationUrl: cloudError.verificationUrl } : {}),
-          }
+          }, true)
         }
         if (cloudError instanceof TosSuspendedError) {
-          return {
+          return this.recordError(accountId, {
             status: 'error',
             updatedAt: new Date().toISOString(),
             groups: this.cached.get(accountId)?.snapshot.groups ?? [],
             error: cloudError.message,
             tosSuspended: true,
             tosAppealUrl: cloudError.appealUrl,
-          }
+          }, true)
         }
-        // On Windows, an inactive backup slot must never fall back to `agy -p /usage`
-        // because `agy.exe` reads the global WinCred entry of the active account.
-        if (!allowCliFallback) {
-          return {
-            status: 'error',
-            updatedAt: new Date().toISOString(),
-            groups: this.cached.get(accountId)?.snapshot.groups ?? [],
-            error: cloudError instanceof Error ? cloudError.message : String(cloudError),
-          }
-        }
-        // Fall through to `agy -p /usage` if available; otherwise report the Cloud Code error.
-        const binary = this.binary()
-        if (binary === undefined) {
-          return {
-            status: 'error',
-            updatedAt: new Date().toISOString(),
-            groups: this.cached.get(accountId)?.snapshot.groups ?? [],
-            error: cloudError instanceof Error ? cloudError.message : String(cloudError),
-          }
-        }
+        // `inspectCloudCodeAccount` throws only after reading a real local OAuth
+        // credential and querying Cloud Code PA. Do not redundantly spawn
+        // `agy -p /usage` on top of an upstream 401/403/429/network error — doing
+        // so doubles upstream traffic, leaks Windows WinCred into backup slots,
+        // and leaves behind extra `acp.log.<pid>` files.
+        const message = cloudError instanceof Error ? cloudError.message : String(cloudError)
+        const isAuth = /HTTP 401|HTTP 403|expired|revoked|forbidden/i.test(message)
+        return this.recordError(accountId, {
+          status: 'error',
+          updatedAt: new Date().toISOString(),
+          groups: this.cached.get(accountId)?.snapshot.groups ?? [],
+          error: message,
+        }, isAuth)
       }
     }
 
@@ -434,15 +456,16 @@ export class QuotaReader {
         ...(previous?.availableModels !== undefined ? { availableModels: previous.availableModels } : {}),
         ...(previous?.disabledModels !== undefined ? { disabledModels: previous.disabledModels } : {}),
       }
+      this.errorBackoff.delete(accountId)
       this.cached.set(accountId, { snapshot, at: Date.now() })
       return snapshot
     } catch (error) {
-      return {
+      return this.recordError(accountId, {
         status: 'error',
         updatedAt: new Date().toISOString(),
         groups: this.cached.get(accountId)?.snapshot.groups ?? [],
         error: error instanceof Error ? error.message : String(error),
-      }
+      }, false)
     }
   }
 }

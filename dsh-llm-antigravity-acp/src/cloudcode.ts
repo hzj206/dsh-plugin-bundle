@@ -19,7 +19,7 @@
  */
 
 import { DEFAULT_TOS_APPEAL_URL } from './account-health.ts'
-import { proxyUrlFromEnv, type AccountLayout } from './accounts.ts'
+import { envWithProxy, proxyUrlFromEnv, type AccountLayout } from './accounts.ts'
 import type { CatalogModel } from './catalog.ts'
 import { EFFORTS, type Effort } from './config.ts'
 import { decodeStoredCredential, persistRefreshedCredentialFile, readStoredCredentialRaw, type ReadCredentialOptions } from './credential.ts'
@@ -35,8 +35,25 @@ export const CLOUD_CODE_HOSTS = [
   'https://daily-cloudcode-pa.sandbox.googleapis.com',
 ] as const
 
-/** Official Hub egress User-Agent matching installed Antigravity 2.29.0 (`cl=1013060670`). */
-export const OFFICIAL_HUB_USER_AGENT = 'antigravity/hub/2.29.0 (aidev_client; os_type=darwin; arch=arm64; cl=1013060670)'
+/**
+ * Build an Antigravity Hub egress User-Agent matching the host OS & CPU architecture
+ * so Cloud Code PA traffic agrees with the local `agy` binary instead of spoofing
+ * a conflicting OS fingerprint on Windows or Linux.
+ * @param platform - Node platform id (`win32`, `darwin`, `linux`).
+ * @param arch - Node CPU architecture (`x64`, `arm64`, ...).
+ * @returns formatted User-Agent header value.
+ */
+export function buildHubUserAgent(
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch,
+): string {
+  const osType = platform === 'win32' ? 'windows' : platform === 'darwin' ? 'darwin' : 'linux'
+  const goArch = arch === 'x64' ? 'amd64' : arch === 'ia32' ? '386' : arch
+  return `antigravity/hub/2.29.0 (aidev_client; os_type=${osType}; arch=${goArch}; cl=1013060670)`
+}
+
+/** Official Hub egress User-Agent aligned with this host's OS and architecture. */
+export const OFFICIAL_HUB_USER_AGENT = buildHubUserAgent()
 
 const OAUTH_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 const OAUTH_CANDIDATE_CLIENTS = [
@@ -182,28 +199,38 @@ export async function readAccountOAuthCredential(
 }
 
 /**
- * Default HTTP POST transport. Uses direct `fetch` when the account declares no
- * custom proxy, and `curl` with `env` when the account configures its own HTTP /
- * HTTPS / SOCKS5 proxy so per-account egress isolation is strictly preserved.
+ * Default HTTP POST transport. Uses `curl` whenever either the account overlay
+ * or the host environment declares an HTTP / HTTPS / SOCKS5 proxy (because
+ * Node's built-in `fetch` ignores proxy environment variables by default),
+ * and uses zero-overhead direct `fetch` when no proxy env is configured
+ * (e.g. direct connections or transparent TUN proxies).
  * @param run - command runner for proxied curl calls.
+ * @param parentEnv - optional host environment override for tests.
  * @returns transport function.
  */
-export function createCloudCodeTransport(run: CommandRunner): CloudCodeTransport {
+export function createCloudCodeTransport(
+  run: CommandRunner,
+  parentEnv: NodeJS.ProcessEnv = process.env,
+): CloudCodeTransport {
   return async (url, headers, body, env) => {
-    const proxy = env !== undefined ? proxyUrlFromEnv(env as Record<string, string>) : ''
+    const accountProxy = env !== undefined ? proxyUrlFromEnv(env as Record<string, string>) : ''
+    const hostProxy = accountProxy.length === 0 ? proxyUrlFromEnv(parentEnv as Record<string, string>) : ''
+    const proxy = accountProxy || hostProxy
     if (proxy.length > 0) {
+      const effectiveEnv: NodeJS.ProcessEnv = accountProxy.length > 0
+        ? (env ?? {})
+        : envWithProxy((env ?? {}) as Record<string, string>, hostProxy)
       const argv = ['curl', '-sS', '--max-time', '15', '-X', 'POST', url, '-w', '\n__HTTP_STATUS__:%{http_code}']
       for (const [key, value] of Object.entries(headers)) {
         argv.push('-H', `${key}: ${value}`)
       }
       argv.push('--data-raw', body)
-      const res = await run(argv, REQUEST_TIMEOUT_MS + 2_000, env)
+      const res = await run(argv, REQUEST_TIMEOUT_MS + 2_000, effectiveEnv)
       if (res.code !== 0) throw new Error(res.stderr.trim() || `curl exit ${String(res.code)}`)
-      const marker = '\n__HTTP_STATUS__:'
-      const idx = res.stdout.lastIndexOf(marker)
-      if (idx < 0) throw new Error('missing HTTP status from curl')
-      const rawBody = res.stdout.slice(0, idx)
-      const status = Number(res.stdout.slice(idx + marker.length).trim())
+      const statusMatch = /\r?\n__HTTP_STATUS__:(\d+)\s*$/.exec(res.stdout)
+      if (statusMatch === null) throw new Error('missing HTTP status from curl')
+      const rawBody = res.stdout.slice(0, statusMatch.index)
+      const status = Number(statusMatch[1])
       let parsed: unknown = rawBody
       try { parsed = JSON.parse(rawBody) } catch { /* non-JSON error text */ }
       return { status, body: parsed }
@@ -831,11 +858,12 @@ async function postWithFallback(
   payload: Record<string, unknown>,
   transport: CloudCodeTransport,
   env?: NodeJS.ProcessEnv,
+  platform?: NodeJS.Platform,
 ): Promise<CloudCodeHttpResponse> {
   const headers = {
     authorization: `Bearer ${accessToken}`,
     'content-type': 'application/json',
-    'user-agent': OFFICIAL_HUB_USER_AGENT,
+    'user-agent': platform !== undefined ? buildHubUserAgent(platform) : OFFICIAL_HUB_USER_AGENT,
   }
   const body = JSON.stringify(payload)
   const hosts = orderedHosts()
@@ -1024,6 +1052,7 @@ export async function inspectCloudCodeAccount(options: {
     { metadata: { ideType: 'ANTIGRAVITY' } },
     transport,
     options.env,
+    options.platform,
   )
   // Retry once on 401 if a refresh token is available.
   if (loadRes.status === 401 && cred.refreshToken !== undefined) {
@@ -1037,6 +1066,7 @@ export async function inspectCloudCodeAccount(options: {
         { metadata: { ideType: 'ANTIGRAVITY' } },
         transport,
         options.env,
+        options.platform,
       )
     }
   }
@@ -1059,8 +1089,8 @@ export async function inspectCloudCodeAccount(options: {
     : {}
 
   const [summaryRes, modelsRes] = await Promise.all([
-    postWithFallback('/v1internal:retrieveUserQuotaSummary', accessToken, projectPayload, transport, options.env),
-    postWithFallback('/v1internal:fetchAvailableModels', accessToken, projectPayload, transport, options.env),
+    postWithFallback('/v1internal:retrieveUserQuotaSummary', accessToken, projectPayload, transport, options.env, options.platform),
+    postWithFallback('/v1internal:fetchAvailableModels', accessToken, projectPayload, transport, options.env, options.platform),
   ])
 
   // Check every 403 for verification or ToS suspension before judging the account fine.

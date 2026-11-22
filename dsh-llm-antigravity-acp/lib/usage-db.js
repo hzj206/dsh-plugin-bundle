@@ -580,18 +580,43 @@ export function readModelStepTail(dbPath, limit) {
     }
 }
 /**
+ * Whether a reasoning effort represents High or higher (`high`, `xhigh`) where
+ * zero-thought non-trivial output is a shadow-degradation indicator.
+ * @param effort - reasoning effort id.
+ * @returns true for `high` and `xhigh`.
+ */
+export function isHighReasoningEffort(effort) {
+    return effort === 'high' || effort === 'xhigh';
+}
+/**
  * Whether one model id belongs to the Gemini 4 flagship families (`gemini-4-argon`,
- * `gemini-4-carbon`) that share the fallback-routing pool the route-health fingerprint judges.
+ * `gemini-4-carbon`, `gemini-4-neon`, `gemini-4-hydrogen`) that the route-health
+ * fingerprint monitors. Orchestrator wrapper models (e.g. `gemini-pro-orchestrator-neon`)
+ * are explicitly excluded because they dispatch across heterogeneous sub-models.
  * @param model - model id or display name.
- * @returns true for every Argon or Carbon variant.
+ * @returns true for Argon, Carbon, Gemini 4 Neon, or Gemini 4 Hydrogen variants.
  */
 export function isGemini4Flagship(model) {
-    return /argon|carbon/i.test(model);
+    if (/orchestrator/i.test(model))
+        return false;
+    return /(?:argon|carbon|gemini[-\s_]*4[-\s_]*(?:neon|hydrogen))/i.test(model);
+}
+/**
+ * Whether one Gemini 4 flagship belongs to the high-throughput Hydrogen tier
+ * whose healthy decode speed naturally reaches 160-320 tok/s and TTFT ~3-4.5s.
+ * @param model - model id or display name.
+ * @returns true for Gemini 4 Hydrogen variants.
+ */
+export function isHighSpeedGemini4(model) {
+    if (/orchestrator/i.test(model))
+        return false;
+    return /gemini[-\s_]*4[-\s_]*hydrogen/i.test(model);
 }
 /**
  * Evaluate the 5-dimensional physical shadow-degradation fingerprint on one model step.
- * Only Gemini 4 flagship (`gemini-4-argon`, `gemini-4-carbon`) requests with non-zero billing are evaluated; a total score `>= 3`
- * diagnoses upstream fallback routing while keeping single borderline metrics below threshold.
+ * Gemini 4 flagship (`gemini-4-argon`, `gemini-4-carbon`, `gemini-4-neon`, `gemini-4-hydrogen`)
+ * requests with non-zero billing are evaluated; a total score `>= 3` diagnoses upstream
+ * fallback routing while keeping single borderline metrics below threshold.
  * `block_cache` is only corroborating evidence, so signals consisting solely of it never degrade
  * on their own.
  * @param input - step metrics, pre-send context estimate, and prior same-session cache state.
@@ -661,8 +686,17 @@ export function evaluateDegradeFingerprint(input) {
         });
     }
     // F3: Fallback-tier decode velocity ceiling (+2, +3 on a cold-prefix burst).
-    const fastStream = step.textOutTokens >= 200 && rawStreamTps >= 220;
-    const fastWall = step.outputTokens >= 350 && rawWallTps >= 180;
+    // Require streamSeconds >= 0.5 (0.8 on Hydrogen) so single-chunk buffered tool/finish
+    // deliveries (~0.07s) cannot produce artificial 3,000-30,000 tok/s spikes.
+    // Hydrogen is natively a high-throughput Gemini 4 model (healthy p90 ~159 tok/s wall,
+    // bursts to ~320 tok/s), so it uses a higher physical velocity ceiling than Argon/Carbon/Neon.
+    const highSpeedFamily = isHighSpeedGemini4(input.model);
+    const fastStream = highSpeedFamily
+        ? (step.streamSeconds >= 0.8 && step.textOutTokens >= 200 && rawStreamTps >= 450)
+        : (step.streamSeconds >= 0.5 && step.textOutTokens >= 200 && rawStreamTps >= 220);
+    const fastWall = highSpeedFamily
+        ? (step.outputTokens >= 350 && rawWallTps >= 380)
+        : (step.outputTokens >= 350 && rawWallTps >= 180);
     if (fastStream || fastWall) {
         // No prefix cache read plus a sub-5.5s TTFT and a fast decode: only the fallback pool
         // answers a cold 2048-block prompt that fast, so the cold burst corroborates by itself.
@@ -690,8 +724,8 @@ export function evaluateDegradeFingerprint(input) {
             consecutiveBlocks,
         });
     }
-    // F5: Zero or shallow thinking under High effort.
-    if (input.effort === 'high') {
+    // F5: Zero or shallow thinking under High / XHigh effort.
+    if (isHighReasoningEffort(input.effort)) {
         const nonTrivialZeroThought = step.thoughtTokens === 0
             && (step.outputTokens >= 60 || (input.isToolStep === true && step.outputTokens > 0));
         if (nonTrivialZeroThought) {
@@ -705,7 +739,7 @@ export function evaluateDegradeFingerprint(input) {
                 ttftSeconds,
             });
         }
-        else if (step.outputTokens >= 400 && step.ttftSeconds > 0 && step.ttftSeconds < 4.5 && step.thoughtTokens < 650) {
+        else if (!highSpeedFamily && step.outputTokens >= 400 && step.ttftSeconds > 0 && step.ttftSeconds < 4.5 && step.thoughtTokens < 650) {
             score += 1;
             signals.push({
                 kind: 'shallow_thought',

@@ -123,9 +123,9 @@ export interface Config {
   longDecodeContinuations: Volatile<number>
   /** Start the ACP process and read the model catalog at plugin load. */
   warmup: boolean
-  /** Minimum interval between quota refreshes through `agy -p /usage`. */
+  /** Minimum interval between quota refreshes (default 5 minutes to reduce idle background traffic). */
   quotaTtlMs: number
-  /** Intervention level of the Gemini 4 flagship (Argon / Carbon) route-health fingerprint; see {@link DEGRADE_ACTIONS}. */
+  /** Intervention level of the Gemini 4 flagship (Argon / Carbon / Neon / Hydrogen) route-health fingerprint; see {@link DEGRADE_ACTIONS}. */
   degradeAction: Volatile<DegradeAction>
   /** Agent engine mode (`bridge` or `native`); see {@link ENGINE_MODES}. */
   engineMode: Volatile<EngineMode>
@@ -169,7 +169,7 @@ export const Config: z<Config> = z.object({
   relayAfterMs: z.number().step(1).min(5_000).max(165_000).default(85_000),
   longDecodeContinuations: maybeVolatile(z.number().step(1).min(0).max(16).default(3)),
   warmup: z.boolean().default(true),
-  quotaTtlMs: z.number().step(1).min(5_000).default(120_000),
+  quotaTtlMs: z.number().step(1).min(5_000).default(300_000),
   degradeAction: maybeVolatile(z.union(DEGRADE_ACTIONS).default('truncation')),
   engineMode: maybeVolatile(z.union(ENGINE_MODES).default('bridge')),
   // The published schemastery declarations type `.volatile()` fields as plain values.

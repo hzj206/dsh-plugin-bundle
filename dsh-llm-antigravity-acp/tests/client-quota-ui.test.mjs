@@ -188,10 +188,11 @@ const flush = async () => {
   await new Promise((resolve) => setTimeout(resolve, 0))
 }
 
-function loadClientPlugin({ language = 'zh-CN', remoteService, sessions, uiWorkspace, clipboard } = {}) {
+function loadClientPlugin({ language = 'zh-CN', remoteService, sessions, uiWorkspace, clipboard, now } = {}) {
   const { React, mount } = createMiniReact()
   const listeners = new Map()
   const document = {
+    visibilityState: 'visible',
     addEventListener(type, fn) {
       if (!listeners.has(type)) listeners.set(type, new Set())
       listeners.get(type).add(fn)
@@ -205,17 +206,29 @@ function loadClientPlugin({ language = 'zh-CN', remoteService, sessions, uiWorks
   }
 
   let loadedSpec = null
+  const winListeners = new Map()
   const window = {
     __ModuleLoader__: {
       load(spec) {
         loadedSpec = spec
       },
     },
+    addEventListener(type, fn) {
+      if (!winListeners.has(type)) winListeners.set(type, new Set())
+      winListeners.get(type).add(fn)
+    },
+    removeEventListener(type, fn) {
+      if (winListeners.has(type)) winListeners.get(type).delete(fn)
+    },
+    dispatch(type, event) {
+      for (const fn of [...(winListeners.get(type) || [])]) fn(event)
+    },
   }
 
+  const clock = typeof now === 'function' ? now : () => FIXED_NOW
   class CustomDate extends Date {
     static now() {
-      return FIXED_NOW
+      return clock()
     }
   }
 
@@ -2520,5 +2533,209 @@ test('QuotaPill localizes This Mac to 本机 and renders the session account pan
   assert.ok(!textOf(switcher).includes('This Mac'), 'popover must not leak raw This Mac label on zh-CN')
   assert.match(textOf(switcher), /本机.*alice@example\.com.*PRO.*72%/)
   assert.ok(findOne(switcher, (n) => n.props && n.props['data-agy-single-account-hint'] === 'true'))
+  view.unmount()
+})
+
+test('D3 UI: QuotaPill displays route-health degrade card on Neon and Hydrogen, and hides it on Orchestrator', async () => {
+  const healthEntry = (model) => ({
+    sessionId: 'sess-flagship',
+    acpSessionId: 'acp-1',
+    model,
+    degraded: true,
+    score: 5,
+    signals: [{ kind: 'context_truncated', points: 5, detail: '320K→128K' }],
+    streamTps: 90,
+    wallTps: 60,
+    ttftSeconds: 3.1,
+    thoughtTokens: 15,
+    contextTokens: 127_997,
+    consecutiveDegradedTurns: 1,
+    interceptedSteps: 0,
+    hasHealthyArgonCache: false,
+    updatedAt: new Date(FIXED_NOW).toISOString(),
+  })
+
+  const { registered, mount, store } = loadClientPlugin({
+    language: 'zh-CN',
+    remoteService: {
+      status: () => ({
+        state: 'ready',
+        degradeAction: 'truncation',
+        sessionHealth: { 'sess-flagship': healthEntry('gemini-4-neon') },
+      }),
+      quota: async (req) => ({
+        status: 'ok',
+        model: req.model,
+        accountId: 'default',
+        accountLabel: 'This Mac',
+        updatedAt: new Date(FIXED_NOW).toISOString(),
+        groups: [{ kind: 'gemini', name: 'Gemini', description: '', buckets: [{ id: 'weekly', name: 'Weekly', window: 'weekly', remainingFraction: 0.8, resetTime: isoAfterHours(48) }] }],
+      }),
+    },
+  })
+
+  const slot = registered.get('conversation.input.right')
+
+  // Neon -> shows degrade chip and card
+  store.setCurrent({ provider: 'antigravity', model: 'gemini-4-neon' })
+  const view = mount(slot.Component, slot.meta.inject('sess-flagship'))
+  await flush()
+  let pillBtn = findOne(view.tree, (n) => n.tag === 'button')
+  assert.match(textOf(pillBtn), /降智$/)
+  pillBtn.props.onClick()
+  await flush()
+  assert.ok(findOne(view.tree, (n) => n.props && n.props['data-agy-degrade-card'] === 'true'))
+
+  // Hydrogen -> also flagship, shows degrade card
+  store.setCurrent({ provider: 'antigravity', model: 'gemini-4-hydrogen' })
+  await flush()
+  assert.ok(findOne(view.tree, (n) => n.props && n.props['data-agy-degrade-card'] === 'true'))
+
+  // Orchestrator Neon -> NOT flagship, must NOT show degrade card
+  store.setCurrent({ provider: 'antigravity', model: 'gemini-pro-orchestrator-neon' })
+  await flush()
+  assert.equal(findOne(view.tree, (n) => n.props && n.props['data-agy-degrade-card'] === 'true'), null)
+
+  view.unmount()
+})
+
+test('D4 UI: QuotaPill pauses polling when hidden or idle >= 10m, refreshes on wake, and polls while activeTurns > 0', async () => {
+  let nowMs = FIXED_NOW
+  let quotaCalls = 0
+  let activeTurns = 0
+
+  const { registered, mount, document, intervals, store } = loadClientPlugin({
+    language: 'zh-CN',
+    now: () => nowMs,
+    remoteService: {
+      status: () => ({ state: 'ready', activeTurns, accounts: [] }),
+      quota: async (req) => {
+        quotaCalls += 1
+        return {
+          status: 'ok',
+          model: req.model,
+          updatedAt: new Date(nowMs).toISOString(),
+          groups: [{ kind: 'gemini', name: 'Gemini', description: '', buckets: [{ id: 'weekly', name: 'Weekly', window: 'weekly', remainingFraction: 0.9, resetTime: isoAfterHours(48) }] }],
+        }
+      },
+    },
+  })
+  store.setCurrent({ provider: 'antigravity', model: 'gemini-4-neon' })
+
+  const slot = registered.get('conversation.input.right')
+  const view = mount(slot.Component, slot.meta.inject('sess-idle'))
+  await flush()
+  assert.equal(quotaCalls, 1, 'initial mount fetches once')
+  assert.equal(intervals.size, 1, 'one quota poll interval registered')
+  const [timer] = [...intervals]
+
+  // 1. Hidden window -> timer tick is completely skipped
+  document.visibilityState = 'hidden'
+  nowMs += 300_000
+  timer.fn()
+  await flush()
+  assert.equal(quotaCalls, 1, 'hidden page must not poll quota')
+
+  // 2. Wake back to visible after >= 5m -> triggers one catch-up refresh
+  document.visibilityState = 'visible'
+  document.dispatch('visibilitychange', {})
+  await flush()
+  assert.equal(quotaCalls, 2, 'returning to visible after >= 5m refreshes once')
+
+  // 3. Idle >= 10m with activeTurns === 0 -> timer tick skipped
+  nowMs += 11 * 60_000
+  timer.fn()
+  await flush()
+  assert.equal(quotaCalls, 2, 'idle >= 10m with no active turns must not poll')
+
+  // 4. User activity (keydown) resets idle clock -> next tick refreshes
+  document.dispatch('keydown', { key: 'a' })
+  timer.fn()
+  await flush()
+  assert.equal(quotaCalls, 3, 'recent user activity resumes polling')
+
+  // 5. Idle >= 10m again, but activeTurns > 0 (streaming) -> still refreshes
+  activeTurns = 1
+  // Sync runtimeStatus with activeTurns=1 first
+  document.dispatch('pointerdown', {})
+  timer.fn()
+  await flush()
+  assert.equal(quotaCalls, 4)
+  nowMs += 15 * 60_000
+  timer.fn()
+  await flush()
+  assert.equal(quotaCalls, 5, 'active streaming turn keeps quota refresh alive')
+
+  view.unmount()
+})
+
+test('D6 UI: Re-login on an already signed-in account stays open, supports Enter submit, retry link on error, and Windows isolation hint', async () => {
+  const submitted = []
+  let loginResult = { ok: false, email: undefined, error: 'agy exited with code 1 token exchange failed: invalid_grant' }
+  const rows = [
+    accountRow('default', { system: true, email: 'main@example.com', state: 'ready', hasRefreshToken: true }),
+    accountRow('acc-2', { system: false, label: 'Work', email: 'work@example.com', state: 'ready', hasRefreshToken: true }),
+  ]
+
+  const { registered, mount } = loadClientPlugin({
+    language: 'zh-CN',
+    remoteService: {
+      status: async () => ({
+        ...accountsStatus(rows),
+        platform: 'win32',
+        multiAccountMode: 'concurrent',
+        activeAccountId: 'default',
+      }),
+      accounts: async () => rows,
+      quota: async () => ({ status: 'ok', updatedAt: new Date(FIXED_NOW).toISOString(), groups: [] }),
+      login: async (req) => ({
+        accountId: req.accountId,
+        url: 'https://accounts.google.com/o/oauth2/auth?state=relogin',
+        command: "$env:WSL_INTEROP='dsh-isolated-slot'; & 'G:\\agy\\agy.exe' acp --login",
+      }),
+      loginCode: async (req) => {
+        submitted.push(req)
+        return loginResult
+      },
+      cancelLogin: async () => ({ ...accountsStatus(rows), platform: 'win32' }),
+    },
+  })
+
+  const slot = registered.get('settings.section')
+  const view = mount(slot.Component, slot.meta.inject())
+  await flush()
+
+  // Open Edit modal on acc-2 (already signed in as work@example.com) and click 重新登录
+  const workCard = () => findOne(view.tree, (n) => n.props && n.props['data-agy-account'] === 'acc-2')
+  findOne(workCard(), (n) => n.tag === 'button' && textOf(n) === '编辑').props.onClick()
+  await flush()
+  findOne(view.tree, (n) => n.tag === 'button' && textOf(n) === '重新登录').props.onClick()
+  await flush()
+  await flush()
+
+  // Ticket MUST stay open despite accounts() immediately returning the existing work@example.com!
+  const codeInput = findOne(workCard(), (n) => n.tag === 'input' && n.props['aria-label'] === '授权码')
+  assert.ok(codeInput, 're-login ticket must stay open instead of closing on prior email')
+  assert.ok(findOne(workCard(), (n) => n.props && n.props['data-agy-ticket-isolated-note'] === 'true'),
+    'Windows non-system ticket displays isolated sign-in note')
+
+  // Paste code and press Enter -> submits loginCode and surfaces stdout error + New link button
+  codeInput.props.onChange({ target: { value: '4/0BAD_CODE' } })
+  await flush()
+  findOne(workCard(), (n) => n.tag === 'input' && n.props['aria-label'] === '授权码').props.onKeyDown({ key: 'Enter' })
+  await flush()
+  assert.equal(submitted.length, 1)
+  assert.equal(submitted[0].code, '4/0BAD_CODE')
+  assert.match(textOf(workCard()), /invalid_grant/)
+  assert.ok(findOne(workCard(), (n) => n.props && n.props['data-agy-retry-login'] === 'acc-2'),
+    'failed login offers one-click retry link button')
+
+  // Succeed on second attempt
+  loginResult = { ok: true, email: 'work-fresh@example.com', error: undefined }
+  findOne(workCard(), (n) => n.tag === 'input' && n.props['aria-label'] === '授权码').props.onKeyDown({ key: 'Enter' })
+  await flush()
+  assert.equal(findOne(workCard(), (n) => n.tag === 'input' && n.props['aria-label'] === '授权码'), null, 'ticket closes on successful submit')
+  assert.match(textOf(workCard()), /已登录 work-fresh@example\.com/)
+
   view.unmount()
 })

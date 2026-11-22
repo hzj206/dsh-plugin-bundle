@@ -60,7 +60,7 @@ import {
   MAX_EAGER_BRIDGE_TOOL_BYTES, resolveActiveToolSchemas, toBridgeTools,
 } from './tool-bridge.ts'
 import {
-  hasGenMetadata, isGemini4Flagship, peekMaxGenMetadataIdx, peekMaxModelStepIdx,
+  hasGenMetadata, isGemini4Flagship, isHighReasoningEffort, peekMaxGenMetadataIdx, peekMaxModelStepIdx,
   readGenUsageAfter, readModelStepTail, readModelStepsAfter, sessionDbPath,
   type DegradeFingerprintResult,
 } from './usage-db.ts'
@@ -202,6 +202,10 @@ interface PumpContext {
 interface LoginSession {
   child: AcpChild
   url: string
+  /** Post-prompt stdout + stderr diagnostic tail (Windows `agy` prints OAuth errors to stdout). */
+  outputTail: () => string
+  /** Email held by this slot before sign-in started, so identity changes reset old health flags. */
+  previousEmail?: string
   /** On Windows, snapshot of WinCred taken right before starting sign-in so cancel/failure restores it. */
   previousWinCred?: string
   previousActiveAccountId?: string
@@ -698,7 +702,7 @@ export class AntigravityRuntime implements AccountAdmin {
    * tier/catalog/quota of configured accounts.
    * @param _fetchAll - reserved for callers requesting explicit inspection of every account.
    */
-  async refreshAccountEmails(_fetchAll = false): Promise<void> {
+  async refreshAccountEmails(fetchQuota = false): Promise<void> {
     const epoch = this.identityEpoch
     await Promise.all([...this.slots.values()].map(async (slot) => {
       const credOpts = this.credentialOptionsFor(slot)
@@ -710,7 +714,11 @@ export class AntigravityRuntime implements AccountAdmin {
       if (this.identityEpoch !== epoch) return
       slot.email = identity.email
       slot.hasRefreshToken = identity.hasRefreshToken
-      if (identity.email !== undefined && identity.email.length > 0) {
+      // Anti-risk hygiene: never auto-probe disabled or ToS-suspended accounts in the background.
+      // Only fetch Cloud Code quota when explicitly requested (`fetchQuota = true`) for active accounts;
+      // QuotaReader's TTL + error-backoff cache ensures rapid polls (e.g. during sign-in) incur zero upstream storm.
+      const isSuspended = this.health.get(slot.layout.id)?.tosSuspended === true
+      if (fetchQuota && slot.layout.enabled && !isSuspended && identity.email !== undefined && identity.email.length > 0) {
         const snap = await this.quota.readFor(slot.layout.id, slot.env, false, slot.layout, credOpts).catch(() => undefined)
         if (this.identityEpoch !== epoch) return
         if (snap !== undefined) {
@@ -1164,7 +1172,7 @@ export class AntigravityRuntime implements AccountAdmin {
     if (this.pool.list().length === 0) return
     if (accountId !== undefined) {
       const target = this.slotFor(accountId)
-      target.email = await readAccountEmail(target.layout, this.host.runCommand).catch(() => undefined)
+      target.email = await readAccountEmail(target.layout, this.host.runCommand, this.platform, this.credentialOptionsFor(target)).catch(() => undefined)
       if (target.email !== undefined && target.email.length > 0) {
         const snap = await this.quotaFor(target.layout.id, true)
         if (snap.status === 'ok' && snap.availableModels !== undefined && snap.availableModels.length > 0) {
@@ -1176,8 +1184,15 @@ export class AntigravityRuntime implements AccountAdmin {
       return
     }
 
-    await this.refreshAccountEmails()
-    const signedIn = [...this.slots.values()].filter(c => c.layout.enabled && typeof c.email === 'string' && c.email.length > 0)
+    // Hydrate local credential metadata first (zero network calls), then inspect each enabled,
+    // non-suspended signed-in account ONCE instead of double-fetching on boot.
+    await this.refreshAccountEmails(false)
+    const signedIn = [...this.slots.values()].filter(
+      c => c.layout.enabled
+        && this.health.get(c.layout.id)?.tosSuspended !== true
+        && typeof c.email === 'string'
+        && c.email.length > 0,
+    )
     if (signedIn.length > 0) {
       const snapshots = await Promise.all(signedIn.map(s => this.quotaFor(s.layout.id, true).catch(() => undefined)))
       if (snapshots.some(s => s !== undefined && s.status === 'ok' && s.availableModels !== undefined && s.availableModels.length > 0)) {
@@ -2253,7 +2268,7 @@ export class AntigravityRuntime implements AccountAdmin {
   ): AsyncGenerator<StreamChunk> {
     const turn = conv.turn as AcpTurn
     // Text is held only while a verdict could still refuse it; observation never refuses.
-    const holdZeroThoughtText = conv.purpose === MAIN_PURPOSE && isGemini4Flagship(options.model) && effort === 'high'
+    const holdZeroThoughtText = conv.purpose === MAIN_PURPOSE && isGemini4Flagship(options.model) && isHighReasoningEffort(effort)
       && this.degradeAction() !== 'observe'
     let finishKind: string | undefined
     try {
@@ -3124,22 +3139,25 @@ export class AntigravityRuntime implements AccountAdmin {
       const saved = await this.saveCurrentWinCredToOwningSlot()
       previousWinCred = saved.raw
     }
-    const command = loginCommand(slot.layout, binary)
+    const command = loginCommand(slot.layout, binary, this.platform)
     this.logins.get(accountId)?.child.terminate()
     this.logins.delete(accountId)
     const argv = this.platform === 'win32' && !slot.layout.system
       ? [binary, 'acp', '--gemini-dir', slot.layout.geminiDir, '--app-data-dir', 'agy', '--login']
       : [binary, 'acp', '--login']
     const child = this.host.spawnAcp(argv, slot.layout.workspace, slot.env)
-    const url = await readLoginUrl(child, 45_000)
+    const { url, detail, outputTail } = await readLoginUrl(child, 45_000)
     if (url.length === 0) {
       child.terminate()
-      throw new LlmError(`Antigravity returned no sign-in URL for account "${accountId}". Run this in a terminal instead: ${command}`, 'AUTH')
+      const reason = detail.length > 0 ? ` (${detail})` : ''
+      throw new LlmError(`Antigravity returned no sign-in URL for account "${accountId}"${reason}. Run this in a terminal instead: ${command}`, 'AUTH')
     }
     void child.exited.then(() => { if (this.logins.get(accountId)?.child === child) this.logins.delete(accountId) })
     this.logins.set(accountId, {
       child,
       url,
+      outputTail,
+      ...(slot.email !== undefined ? { previousEmail: slot.email } : {}),
       ...(previousWinCred !== undefined ? { previousWinCred } : {}),
       ...(previousActiveAccountId !== undefined ? { previousActiveAccountId } : {}),
     })
@@ -3148,17 +3166,34 @@ export class AntigravityRuntime implements AccountAdmin {
 
   /**
    * Finish an interactive sign-in with the authorization code from the browser.
+   * Accepts either a raw OAuth authorization code or the full callback URL.
    * @param accountId - account being signed in.
-   * @param code - authorization code pasted from the browser.
+   * @param code - authorization code or callback URL pasted from the browser.
    * @returns whether the account now holds a credential.
    */
   async completeLogin(accountId: string, code: string): Promise<LoginResult> {
     const session = this.logins.get(accountId)
     if (session === undefined) return { ok: false, email: undefined, error: 'No sign-in is pending for this account.' }
     const slot = this.slotFor(accountId)
-    session.child.stdin.write(`${code.trim()}\n`)
-    const outcome = await Promise.race([session.child.exited, delay(120_000).then(() => 'timeout' as const)])
+    const normalizedCode = normalizeLoginCodeInput(code)
+    if (normalizedCode.length === 0) {
+      return { ok: false, email: undefined, error: 'Paste the authorization code or callback URL first.' }
+    }
+    session.child.stdin.write(`${normalizedCode}\n`)
+    let loginTimer: ReturnType<typeof setTimeout> | undefined
+    const loginTimeout = new Promise<'timeout'>((resolve) => {
+      loginTimer = setTimeout(() => resolve('timeout'), 120_000)
+    })
+    const outcome = await Promise.race([session.child.exited, loginTimeout]).finally(() => {
+      if (loginTimer !== undefined) clearTimeout(loginTimer)
+    })
     if (this.logins.get(accountId)?.child === session.child) this.logins.delete(accountId)
+    const failureDetail = (): string => {
+      const out = session.outputTail().trim()
+      const err = session.child.stderrTail().trim()
+      if (out.length > 0 && err.length > 0 && !out.includes(err)) return `${out} ${err}`.trim()
+      return out || err
+    }
     if (outcome === 'timeout') {
       session.child.terminate()
       if (this.platform === 'win32' && slot.layout.system && session.previousWinCred !== undefined) {
@@ -3166,12 +3201,29 @@ export class AntigravityRuntime implements AccountAdmin {
       }
       return { ok: false, email: undefined, error: 'The sign-in did not finish within 120 seconds.' }
     }
+    const finalizeSignedInSlot = async (email: string | undefined, hasRefreshToken: boolean): Promise<void> => {
+      const prevEmailLower = (session.previousEmail ?? this.health.get(slot.layout.id)?.email)?.toLowerCase()
+      const nextEmailLower = email?.toLowerCase()
+      if (prevEmailLower !== undefined && nextEmailLower !== undefined && prevEmailLower !== nextEmailLower) {
+        this.health.delete(slot.layout.id)
+      }
+      slot.verificationRequired = false
+      slot.verificationUrl = undefined
+      slot.email = email
+      slot.hasRefreshToken = hasRefreshToken
+      if (slot.process !== undefined || slot.starting !== undefined) {
+        this.stopSlotProcess(slot, `Signed in account "${accountId}"; restarting ACP front.`)
+      }
+      this.quota.clearAccount(slot.layout.id)
+      await this.quotaFor(slot.layout.id, true).catch(() => undefined)
+      if (this.recomputeUnionCatalog()) this.host.onModelsChanged()
+    }
     if (this.platform === 'win32' && slot.layout.system) {
       if (outcome.code !== 0) {
         if (session.previousWinCred !== undefined) {
           await writeWindowsCredential(this.host.runCommand, session.previousWinCred, { requireRefreshToken: false }).catch(() => undefined)
         }
-        return { ok: false, email: undefined, error: `agy exited with code ${String(outcome.code)} ${session.child.stderrTail()}`.trim() }
+        return { ok: false, email: undefined, error: `agy exited with code ${String(outcome.code)} ${failureDetail()}`.trim() }
       }
       // Capture the freshly written WinCred blob into the system slot's backup file.
       let freshRaw: string | undefined
@@ -3183,20 +3235,13 @@ export class AntigravityRuntime implements AccountAdmin {
       if (parsed !== undefined) {
         this.identityEpoch += 1
         writeSlotCredentialFile(slot.layout, parsed.rawJson, true)
-        slot.email = parsed.email
-        slot.hasRefreshToken = parsed.hasRefreshToken
-        if (slot.process !== undefined || slot.starting !== undefined) {
-          this.stopSlotProcess(slot, `Signed in account "${accountId}"; restarting ACP front.`)
-        }
-        this.quota.clearAccount(slot.layout.id)
-        await this.quotaFor(slot.layout.id, true).catch(() => undefined)
-        if (this.recomputeUnionCatalog()) this.host.onModelsChanged()
+        await finalizeSignedInSlot(parsed.email, parsed.hasRefreshToken)
         return { ok: true, email: parsed.email, error: undefined }
       }
     }
     if (this.platform === 'win32' && !slot.layout.system) {
       if (outcome.code !== 0) {
-        return { ok: false, email: undefined, error: `agy exited with code ${String(outcome.code)} ${session.child.stderrTail()}`.trim() }
+        return { ok: false, email: undefined, error: `agy exited with code ${String(outcome.code)} ${failureDetail()}`.trim() }
       }
       // Mirror freshly written isolated token between `<appDir>` and `<homeDir>/.gemini/antigravity-cli`.
       syncOAuthToken(slot.layout.geminiDir, slot.layout.homeDir)
@@ -3218,14 +3263,7 @@ export class AntigravityRuntime implements AccountAdmin {
       if (parsed !== undefined) {
         this.identityEpoch += 1
         writeSlotCredentialFile(slot.layout, parsed.rawJson, true)
-        slot.email = parsed.email ?? identity.email
-        slot.hasRefreshToken = parsed.hasRefreshToken
-        if (slot.process !== undefined || slot.starting !== undefined) {
-          this.stopSlotProcess(slot, `Signed in account "${accountId}"; restarting ACP front.`)
-        }
-        this.quota.clearAccount(slot.layout.id)
-        await this.quotaFor(slot.layout.id, true).catch(() => undefined)
-        if (this.recomputeUnionCatalog()) this.host.onModelsChanged()
+        await finalizeSignedInSlot(parsed.email ?? identity.email, parsed.hasRefreshToken)
         return { ok: true, email: slot.email, error: undefined }
       }
     }
@@ -3240,7 +3278,7 @@ export class AntigravityRuntime implements AccountAdmin {
     return {
       ok,
       email,
-      error: ok ? undefined : `agy exited with code ${String(outcome.code)} ${session.child.stderrTail()}`.trim(),
+      error: ok ? undefined : `agy exited with code ${String(outcome.code)} ${failureDetail()}`.trim(),
     }
   }
 
@@ -3290,21 +3328,78 @@ function collectUsedTurnTags(messages: readonly RequestMessage[], into: Set<stri
   }
 }
 
-async function readLoginUrl(child: AcpChild, timeoutMs: number): Promise<string> {
-  let buffer = ''
-  const match = (): string | undefined => /https:\/\/accounts\.google\.com\/[^\s"'<>]+/.exec(buffer)?.[0]
-  return new Promise<string>((resolve) => {
-    const finish = (): void => {
-      clearTimeout(timer)
-      child.stdout.off('data', onData)
-      resolve(match() ?? '')
+/**
+ * Clean a user-pasted Google OAuth authorization code or full callback URL.
+ * Accepts bare codes (`4/0A...`), quoted codes, `code=...` query snippets,
+ * or full `https://antigravity.google/oauth-callback?...` landing URLs.
+ * @param raw - raw pasted input from the settings card.
+ * @returns single-line string safe to feed into `agy acp --login` stdin.
+ */
+export function normalizeLoginCodeInput(raw: string): string {
+  const trimmed = raw.trim().replace(/^["'`]+|["'`]+$/g, '').trim()
+  if (trimmed.length === 0) return ''
+  // Full callback URL (keeps `state` & `code` intact for `agy` PKCE/state validation).
+  const urlMatch = /https?:\/\/[^\s"'<>]+/.exec(trimmed)
+  if (urlMatch !== null) return urlMatch[0]
+  // Bare `code=...` query fragment copied from a URL.
+  const codeParam = /(?:^|[?&])code=([^&\s]+)/i.exec(trimmed)
+  if (codeParam?.[1] !== undefined) {
+    try {
+      return decodeURIComponent(codeParam[1]).replace(/[\r\n\s]+/g, '')
+    } catch {
+      return codeParam[1].replace(/[\r\n\s]+/g, '')
     }
-    const onData = (chunk: Buffer | string): void => {
+  }
+  return trimmed.replace(/[\r\n\s]+/g, '')
+}
+
+async function readLoginUrl(
+  child: AcpChild,
+  timeoutMs: number,
+): Promise<{ url: string; detail: string; outputTail: () => string }> {
+  let buffer = ''
+  let postPrompt = ''
+  let foundUrl = false
+  const matchIn = (text: string): string | undefined => /https:\/\/accounts\.google\.com\/[^\s"'<>]+/.exec(text)?.[0]
+  const appendPost = (chunkText: string): void => {
+    postPrompt += chunkText
+    if (postPrompt.length > 4_096) postPrompt = postPrompt.slice(-4_096)
+  }
+  const onPostData = (chunk: Buffer | string): void => {
+    appendPost(chunk.toString())
+  }
+  return new Promise<{ url: string; detail: string; outputTail: () => string }>((resolve) => {
+    let settled = false
+    const finish = (): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      child.stdout.off('data', onInitialData)
+      const url = matchIn(buffer) ?? matchIn(child.stderrTail()) ?? ''
+      if (url.length > 0) {
+        foundUrl = true
+        // Keep collecting post-prompt stdout until child exits because Windows
+        // `agy.exe acp --login` prints token-exchange failures to stdout, not stderr.
+        const promptEnd = buffer.indexOf(url) + url.length
+        const trailing = buffer.slice(promptEnd)
+        const enterIdx = trailing.toLowerCase().indexOf('press enter:')
+        if (enterIdx >= 0) appendPost(trailing.slice(enterIdx + 'press enter:'.length))
+        child.stdout.on('data', onPostData)
+        void child.exited.then(() => { child.stdout.off('data', onPostData) }, () => { child.stdout.off('data', onPostData) })
+      }
+      const diag = [child.stderrTail().trim(), buffer.trim()].filter(Boolean).join(' ').slice(0, 300)
+      resolve({
+        url,
+        detail: foundUrl ? '' : diag,
+        outputTail: () => postPrompt.replace(/^[\r\n\s]+|[\r\n\s]+$/g, ''),
+      })
+    }
+    const onInitialData = (chunk: Buffer | string): void => {
       buffer += chunk.toString()
-      if (match() !== undefined) finish()
+      if (matchIn(buffer) !== undefined) finish()
     }
     const timer = setTimeout(finish, timeoutMs)
-    child.stdout.on('data', onData)
+    child.stdout.on('data', onInitialData)
     void child.exited.then(finish, finish)
   })
 }

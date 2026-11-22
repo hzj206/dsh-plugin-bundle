@@ -1777,6 +1777,13 @@ window.__ModuleLoader__.load({
         // read-only lines carry their own copy action — each one is a wall of
         // wrapped text that no one should have to drag-select.
         ticket ? h('div', { className: 'dsh-agy-ticket' },
+          isWindows && !system ? h('div', {
+            'data-agy-ticket-isolated-note': 'true',
+            style: { fontSize: 11, opacity: 0.72, lineHeight: 1.4 },
+          }, t(
+            'Isolated sign-in: will not overwrite your default Windows login.',
+            '独立凭据登录：不会覆盖本机默认 Windows 账号。',
+          )) : null,
           ticket.url ? h('div', { className: 'dsh-agy-ticket-row', 'data-agy-ticket': 'link' },
             h('a', {
               href: ticket.url,
@@ -1801,13 +1808,17 @@ window.__ModuleLoader__.load({
               type: 'text',
               className: 'dsh-agy-input',
               value: props.code,
-              placeholder: t('Paste authorization code', '粘贴授权码'),
+              placeholder: t('Paste authorization code or callback URL', '粘贴授权码或回调完整链接'),
               'aria-label': t('Authorization code', '授权码'),
               disabled: busy,
               onChange: (e) => props.onChangeCode(e.target.value ?? ''),
+              onKeyDown: (e) => {
+                if (e && e.key === 'Enter' && !busy) props.onSubmitCode()
+              },
               style: { flex: '1 1 180px', height: 34, padding: '4px 10px' },
             }),
             h(SmallButton, { variant: 'primary', disabled: busy, onClick: () => props.onSubmitCode(), style: { height: 34, padding: '0 14px' } }, running('code') ? '…' : t('Submit', '提交')),
+            props.error ? h(SmallButton, { disabled: busy, 'data-agy-retry-login': id, onClick: () => props.onLogin(), style: { height: 34 } }, running('login') ? '…' : t('New link', '重新获取链接')) : null,
             h(SmallButton, { disabled: busy, onClick: () => props.onCancelLogin(), style: { height: 34, padding: '0 14px' } }, running('cancel') ? '…' : t('Cancel', '取消')))) : null,
         props.error ? h('div', { role: 'alert', className: 'dsh-agy-row-alert' }, props.error) : null,
         props.notice ? h('div', { role: 'status', className: 'dsh-agy-row-notice' }, props.notice) : null)
@@ -2151,7 +2162,13 @@ window.__ModuleLoader__.load({
         remember(setRowNotices, row.id, null)
         try {
           const ticket = await props.client.login({ accountId: row.id })
-          remember(setTickets, row.id, { url: ticket.url, command: ticket.command })
+          // Record the prior email so re-login on an already signed-in account
+          // is never closed prematurely by the external-terminal email poller.
+          remember(setTickets, row.id, {
+            url: ticket.url,
+            command: ticket.command,
+            initialEmail: typeof row.email === 'string' ? row.email : '',
+          })
         } catch (error) {
           remember(setRowErrors, row.id, messageOf(error))
         } finally {
@@ -2399,7 +2416,9 @@ window.__ModuleLoader__.load({
             let completedEmail = null
             let completedId = null
             for (const item of freshAccounts) {
-              if (item && tickets[item.id] && typeof item.email === 'string' && item.email.length > 0) {
+              const activeTicket = item ? tickets[item.id] : null
+              const initialEmail = activeTicket && typeof activeTicket.initialEmail === 'string' ? activeTicket.initialEmail : ''
+              if (item && activeTicket && typeof item.email === 'string' && item.email.length > 0 && item.email !== initialEmail) {
                 completedId = item.id
                 completedEmail = item.email
               }
@@ -2617,6 +2636,10 @@ window.__ModuleLoader__.load({
       const modelRef = React.useRef(undefined)
       modelRef.current = selection && selection.model
       const seqRef = React.useRef(0)
+      const lastActivityAtRef = React.useRef(Date.now())
+      const lastRefreshAtRef = React.useRef(0)
+      const runtimeStatusRef = React.useRef(null)
+      runtimeStatusRef.current = runtimeStatus
 
       const syncStatus = React.useCallback(() => {
         if (typeof props.client.statusNow !== 'function') return
@@ -2638,6 +2661,7 @@ window.__ModuleLoader__.load({
           // The host echoes the model it resolved; an answer for another model
           // stays stale even when it is the newest response to arrive.
           if (q && typeof q === 'object' && typeof q.model === 'string' && q.model !== model) return
+          lastRefreshAtRef.current = Date.now()
           setQuota(q && typeof q === 'object' ? q : null)
           setError(q && q.status === 'error' ? q.error || null : null)
           // Re-sync status once the remote service has answered `quota`, so
@@ -2646,6 +2670,7 @@ window.__ModuleLoader__.load({
           syncStatus()
         } catch (e) {
           if (seq !== seqRef.current || model !== modelRef.current) return
+          lastRefreshAtRef.current = Date.now()
           setError(e instanceof Error ? e.message : String(e))
         } finally {
           if (seq === seqRef.current) setBusy(false)
@@ -2707,10 +2732,51 @@ window.__ModuleLoader__.load({
         // is in flight.
         setQuota(null)
         setError(null)
+        lastActivityAtRef.current = Date.now()
         void refresh(false)
-        const quotaTimer = setInterval(() => { void refresh(false) }, 180_000)
+        // Anti-risk hygiene: never poll on a robotic 3-minute clock overnight.
+        // Pause completely when the window is hidden or idle for >= 10 minutes
+        // (unless a turn is actively streaming), add jitter to the 5-minute cycle,
+        // and refresh once on wake when returning after >= 5 minutes away.
+        const QUOTA_POLL_MS = 300_000
+        const QUOTA_IDLE_PAUSE_MS = 10 * 60_000
+        const pollIntervalMs = QUOTA_POLL_MS + Math.floor(Math.random() * 30_000)
+        const markActive = () => { lastActivityAtRef.current = Date.now() }
+        const onWake = () => {
+          if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+          const now = Date.now()
+          lastActivityAtRef.current = now
+          if (lastRefreshAtRef.current > 0 && now - lastRefreshAtRef.current >= QUOTA_POLL_MS) {
+            void refresh(false)
+          }
+        }
+        const quotaTimer = setInterval(() => {
+          if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+          const idleMs = Date.now() - lastActivityAtRef.current
+          const activeTurns = runtimeStatusRef.current ? Number(runtimeStatusRef.current.activeTurns) || 0 : 0
+          if (idleMs >= QUOTA_IDLE_PAUSE_MS && activeTurns === 0) return
+          void refresh(false)
+        }, pollIntervalMs)
+        const hasDocEvents = typeof document !== 'undefined' && typeof document.addEventListener === 'function'
+        const hasWinEvents = typeof window !== 'undefined' && typeof window.addEventListener === 'function'
+        if (hasDocEvents) {
+          document.addEventListener('pointerdown', markActive)
+          document.addEventListener('keydown', markActive)
+          document.addEventListener('visibilitychange', onWake)
+        }
+        if (hasWinEvents) {
+          window.addEventListener('focus', onWake)
+        }
         return () => {
           clearInterval(quotaTimer)
+          if (hasDocEvents && typeof document.removeEventListener === 'function') {
+            document.removeEventListener('pointerdown', markActive)
+            document.removeEventListener('keydown', markActive)
+            document.removeEventListener('visibilitychange', onWake)
+          }
+          if (hasWinEvents && typeof window.removeEventListener === 'function') {
+            window.removeEventListener('focus', onWake)
+          }
         }
       }, [active, selection && selection.model, refresh])
 
@@ -2732,8 +2798,11 @@ window.__ModuleLoader__.load({
       }, [open])
 
       if (!active) return null
-      // Route health covers both Gemini 4 flagship families (Argon and Carbon).
-      const isFlagship = /argon|carbon/i.test(String((selection && selection.model) || ''))
+      // Route health covers Gemini 4 flagship families (Argon, Carbon, Neon, Hydrogen),
+      // excluding orchestrator wrapper models.
+      const selectedModelId = String((selection && selection.model) || '')
+      const isFlagship = !/orchestrator/i.test(selectedModelId)
+        && /(?:argon|carbon|gemini[-\s_]*4[-\s_]*(?:neon|hydrogen))/i.test(selectedModelId)
       const healthMap = runtimeStatus && runtimeStatus.sessionHealth && typeof runtimeStatus.sessionHealth === 'object'
         ? runtimeStatus.sessionHealth
         : null
@@ -3191,7 +3260,7 @@ window.__ModuleLoader__.load({
       { value: 256000, label: '256K' },
     ]
 
-    /** Route-health intervention levels for Gemini 4 Argon / Carbon steps the fingerprint flags. */
+    /** Route-health intervention levels for Gemini 4 flagship (Argon / Carbon / Neon / Hydrogen) steps the fingerprint flags. */
     const degradeOptions = () => [
       { value: 'truncation', label: t('Re-answer on 128K truncation', '128K截断重答') },
       { value: 'legacy', label: t('Re-answer on any flag', '全量降智拦截重答') },

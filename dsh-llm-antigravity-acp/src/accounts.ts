@@ -543,11 +543,51 @@ const WINDOWS_PROFILE_ENV = new Set([
 ])
 
 /**
+ * Network proxy and CA certificate variables safely inherited from the host environment
+ * when an account does not declare its own proxy. Credential-shaped variables (API keys,
+ * tokens, `DSH_HOME`) are never in this allowlist.
+ */
+const PROXY_PASSTHROUGH_ENV = new Set([
+  'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
+  'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS',
+])
+
+const PROXY_URL_ENV_UPPER = new Set(['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY'])
+const PROXY_GROUP_ENV_UPPER = new Set(['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY'])
+
+/**
+ * Merge `127.0.0.1,localhost,::1` into an existing `NO_PROXY` list without duplicates
+ * so loopback traffic to DSH's local MCP bridge never detours through an outbound proxy.
+ * @param existing - existing `NO_PROXY` string, if any.
+ * @returns normalized comma-separated `NO_PROXY` value.
+ */
+export function mergeLoopbackNoProxy(existing: string | undefined): string {
+  const out: string[] = []
+  const seen = new Set<string>()
+  const add = (entry: string): void => {
+    const trimmed = entry.trim()
+    if (trimmed.length === 0) return
+    const key = trimmed.toLowerCase()
+    if (seen.has(key)) return
+    seen.add(key)
+    out.push(trimmed)
+  }
+  if (typeof existing === 'string') {
+    for (const part of existing.split(',')) add(part)
+  }
+  for (const host of LOOPBACK_NO_PROXY.split(',')) add(host)
+  return out.join(',')
+}
+
+/**
  * Explicit environment entries for one CLI process.
  *
  * The subprocess service merges these entries over its scrubbed parent environment. On Windows the
  * profile variables are listed explicitly as well, so the CLI finds its login and settings even when
- * a subprocess provider applies only the explicit entries. Credential-shaped parent names are never
+ * a subprocess provider applies only the explicit entries. Safe proxy/TLS variables are inherited
+ * unless the account overlay declares its own proxy (in which case parent proxy vars are cleared to
+ * preserve per-account egress isolation), and loopback hosts are always merged into `NO_PROXY` when
+ * any proxy is active so the local MCP bridge stays direct. Credential-shaped parent names are never
  * copied here and stay subject to the service's scrub.
  * @param overlay - account overlay from {@link accountEnv}; undefined runs under the real `$HOME`.
  * @param platform - target platform, injectable for tests.
@@ -560,30 +600,80 @@ export function cliEnv(
   parent: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
   const base: NodeJS.ProcessEnv = {}
-  if (platform === 'win32') {
-    for (const [key, value] of Object.entries(parent)) {
-      if (value !== undefined && WINDOWS_PROFILE_ENV.has(key.toUpperCase())) base[key] = value
+  for (const [key, value] of Object.entries(parent)) {
+    if (value === undefined) continue
+    const upper = key.toUpperCase()
+    if ((platform === 'win32' && WINDOWS_PROFILE_ENV.has(upper)) || PROXY_PASSTHROUGH_ENV.has(upper)) {
+      base[key] = value
     }
   }
-  if (overlay === undefined) return { ...base, HOME: homedir() }
-  if (platform === 'win32') {
-    const overlayUpper = new Set(Object.keys(overlay).map(k => k.toUpperCase()))
-    for (const key of Object.keys(base)) {
-      if (overlayUpper.has(key.toUpperCase())) delete base[key]
+  let merged: NodeJS.ProcessEnv
+  if (overlay === undefined) {
+    merged = { ...base, HOME: homedir() }
+  } else {
+    const overlayHasProxy = Object.entries(overlay).some(
+      ([k, v]) => PROXY_URL_ENV_UPPER.has(k.toUpperCase()) && typeof v === 'string' && v.trim().length > 0,
+    )
+    if (overlayHasProxy) {
+      for (const key of Object.keys(base)) {
+        if (PROXY_GROUP_ENV_UPPER.has(key.toUpperCase())) delete base[key]
+      }
+    }
+    if (platform === 'win32') {
+      const overlayUpper = new Set(Object.keys(overlay).map(k => k.toUpperCase()))
+      for (const key of Object.keys(base)) {
+        if (overlayUpper.has(key.toUpperCase())) delete base[key]
+      }
+    }
+    merged = { ...base, ...overlay }
+  }
+  const hasActiveProxy = Object.entries(merged).some(
+    ([k, v]) => PROXY_URL_ENV_UPPER.has(k.toUpperCase()) && typeof v === 'string' && v.trim().length > 0,
+  )
+  if (hasActiveProxy) {
+    const existingNoProxy = merged.NO_PROXY ?? merged.no_proxy
+    const safeNoProxy = mergeLoopbackNoProxy(existingNoProxy)
+    merged.NO_PROXY = safeNoProxy
+    if (platform !== 'win32' || Object.hasOwn(merged, 'no_proxy')) {
+      merged.no_proxy = safeNoProxy
     }
   }
-  return { ...base, ...overlay }
+  return merged
 }
 
 /**
  * Shell command that signs one account in from a terminal.
+ * On Windows, outputs a PowerShell command that scopes `HOME`, `USERPROFILE`,
+ * `WSL_INTEROP`, `--gemini-dir`, and `--app-data-dir` for non-system accounts so
+ * terminal sign-in never overwrites the global Windows Credential Manager entry.
  * @param layout - account layout.
  * @param binary - `agy` executable path.
+ * @param platform - target platform; when omitted, inferred from Windows-style binary paths so POSIX paths stay POSIX.
  * @returns a copy-pasteable command.
  */
-export function loginCommand(layout: AccountLayout, binary: string): string {
+export function loginCommand(
+  layout: AccountLayout,
+  binary: string,
+  platform?: NodeJS.Platform,
+): string {
+  const isWin = platform !== undefined
+    ? platform === 'win32'
+    : /^[A-Za-z]:[\\/]|\\|\.exe$/i.test(binary)
+  if (isWin) {
+    if (layout.system) return `& ${psQuote(binary)} acp --login`
+    return [
+      `$env:HOME=${psQuote(layout.homeDir)}`,
+      `$env:USERPROFILE=${psQuote(layout.homeDir)}`,
+      `$env:WSL_INTEROP='dsh-isolated-slot'`,
+      `& ${psQuote(binary)} acp --gemini-dir ${psQuote(layout.geminiDir)} --app-data-dir 'agy' --login`,
+    ].join('; ')
+  }
   const prefix = layout.system ? '' : `HOME=${shellQuote(layout.homeDir)} `
   return `${prefix}${shellQuote(binary)} acp --login`
+}
+
+function psQuote(value: string): string {
+  return `'${value.replace(/'/g, `''`)}'`
 }
 
 function shellQuote(value: string): string {

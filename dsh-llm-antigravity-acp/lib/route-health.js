@@ -1,9 +1,9 @@
 /**
  * Route health of one conversation: the shadow-degradation fingerprint that
- * decides whether a degraded Gemini 4 flagship (Argon or Carbon) answer is refused and re-asked, the per-turn
- * marks it accumulates, and the numbers the quota pill reads. Everything lives
- * in one object so a reset is a single replacement instead of a field-by-field
- * sweep.
+ * decides whether a degraded Gemini 4 flagship (Argon, Carbon, Neon, or Hydrogen)
+ * answer is refused and re-asked, the per-turn marks it accumulates, and the
+ * numbers the quota pill reads. Everything lives in one object so a reset is a
+ * single replacement instead of a field-by-field sweep.
  * @module dsh-llm-antigravity-acp/route-health
  */
 import { evaluateDegradeFingerprint, isGemini4Flagship, } from './usage-db.js';
