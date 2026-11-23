@@ -292,6 +292,17 @@ export class AntigravityRuntime {
             ?? asEngineMode(current(this.host.config.engineMode))
             ?? 'bridge';
     }
+    /**
+     * Whether DSH automatic compaction pressure is calibrated from real billed
+     * Antigravity provider usage rather than heuristic character estimates.
+     * @returns true when real-usage calibration is active.
+     */
+    realUsageCompaction() {
+        if (this.overrides.realUsageCompaction !== undefined)
+            return this.overrides.realUsageCompaction;
+        const configured = current(this.host.config.realUsageCompaction);
+        return typeof configured === 'boolean' ? configured : true;
+    }
     /** Provider-level model allowlist; empty offers every advertised family. */
     providerVisible() {
         return accountVisibleModels(this.overrides.visibleModels ?? current(this.host.config.visibleModels));
@@ -613,6 +624,7 @@ export class AntigravityRuntime {
             longDecodeContinuations: this.longDecodeContinuations(),
             degradeAction: this.degradeAction(),
             engineMode: this.engineMode(),
+            realUsageCompaction: this.realUsageCompaction(),
             models: this.catalog.list().map(m => ({ ...m })),
             availableModels: this.catalog.availableModels().map(m => ({ ...m })),
             visibleModels: this.providerVisible(),

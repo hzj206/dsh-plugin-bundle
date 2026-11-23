@@ -128,6 +128,8 @@ export interface LiveOverrides {
   degradeAction?: DegradeAction
   /** ACP agent engine mode (`bridge` or `native`); see {@link EngineMode}. */
   engineMode?: EngineMode
+  /** Calibrate DSH compaction pressure from real provider usage instead of heuristic over-estimates. */
+  realUsageCompaction?: boolean
   /**
    * Replace the whole account list, the machine account included as its
    * `system: true` entry. A list without one means the machine account was
@@ -166,6 +168,8 @@ export interface RuntimeStatus {
   degradeAction: DegradeAction
   /** Live ACP agent engine mode (`bridge` or `native`). */
   engineMode: EngineMode
+  /** Whether DSH automatic compaction pressure is calibrated from real billed provider usage. */
+  realUsageCompaction: boolean
   models: { id: string; name: string }[]
   /** Every advertised family with the visibility the current allowlist gives it. */
   availableModels: { id: string; name: string; enabled: boolean }[]
@@ -458,6 +462,17 @@ export class AntigravityRuntime implements AccountAdmin {
     return this.overrides.engineMode
       ?? asEngineMode(current((this.host.config as { engineMode?: unknown }).engineMode))
       ?? 'bridge'
+  }
+
+  /**
+   * Whether DSH automatic compaction pressure is calibrated from real billed
+   * Antigravity provider usage rather than heuristic character estimates.
+   * @returns true when real-usage calibration is active.
+   */
+  realUsageCompaction(): boolean {
+    if (this.overrides.realUsageCompaction !== undefined) return this.overrides.realUsageCompaction
+    const configured = current((this.host.config as { realUsageCompaction?: unknown }).realUsageCompaction)
+    return typeof configured === 'boolean' ? configured : true
   }
 
   /** Provider-level model allowlist; empty offers every advertised family. */
@@ -770,6 +785,7 @@ export class AntigravityRuntime implements AccountAdmin {
       longDecodeContinuations: this.longDecodeContinuations(),
       degradeAction: this.degradeAction(),
       engineMode: this.engineMode(),
+      realUsageCompaction: this.realUsageCompaction(),
       models: this.catalog.list().map(m => ({ ...m })),
       availableModels: this.catalog.availableModels().map(m => ({ ...m })),
       visibleModels: this.providerVisible(),

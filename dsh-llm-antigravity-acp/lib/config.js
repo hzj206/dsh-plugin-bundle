@@ -68,6 +68,7 @@ export const Config = z.object({
     quotaTtlMs: z.number().step(1).min(5_000).default(300_000),
     degradeAction: maybeVolatile(z.union(DEGRADE_ACTIONS).default('truncation')),
     engineMode: maybeVolatile(z.union(ENGINE_MODES).default('bridge')),
+    realUsageCompaction: maybeVolatile(z.boolean().default(true)),
     // The published schemastery declarations type `.volatile()` fields as plain values.
 });
 /**

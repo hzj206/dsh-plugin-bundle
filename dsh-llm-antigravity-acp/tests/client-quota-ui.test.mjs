@@ -739,7 +739,7 @@ test('QuotaPill follows the selected family: Claude and GPT use their own weekly
   view.unmount()
 })
 
-function recordingService(windowValue = 0, decodeValue = 3, degradeValue = 'truncation', engineValue = 'bridge') {
+function recordingService(windowValue = 0, decodeValue = 3, degradeValue = 'truncation', engineValue = 'bridge', compactionValue = true) {
   const patches = []
   const service = {
     status: async () => ({
@@ -751,6 +751,7 @@ function recordingService(windowValue = 0, decodeValue = 3, degradeValue = 'trun
       longDecodeContinuations: decodeValue,
       degradeAction: degradeValue,
       engineMode: engineValue,
+      realUsageCompaction: compactionValue,
       unlock: { status: 'unlocked' },
     }),
     quota: async () => ({ status: 'ok', updatedAt: new Date(FIXED_NOW).toISOString(), groups: [] }),
@@ -761,6 +762,7 @@ function recordingService(windowValue = 0, decodeValue = 3, degradeValue = 'trun
       if ('longDecodeContinuations' in patch) decodeValue = patch.longDecodeContinuations
       if ('degradeAction' in patch) degradeValue = patch.degradeAction
       if ('engineMode' in patch) engineValue = patch.engineMode
+      if ('realUsageCompaction' in patch) compactionValue = patch.realUsageCompaction
       return service.status()
     },
   }
@@ -827,6 +829,7 @@ test('SettingsCard renders live settings as value rows that apply the chosen opt
     '超长续写3 段',
     '降智处理128K截断重答',
     '引擎模式DSH 工具桥接',
+    '压缩触发计量按真实账单校准（推荐）',
   ])
   assert.equal(rows.every((row) => row.props.disabled === false), true)
   const hint = (row) => findOne(row, (node) => node.props && node.props.className === 'dsh-agy-hint')
@@ -835,6 +838,7 @@ test('SettingsCard renders live settings as value rows that apply the chosen opt
   assert.match(hintText(rows[2]), /自动接着写/)
   assert.match(hintText(rows[3]), /128K截断重答/)
   assert.match(hintText(rows[4]), /谁来读文件/)
+  assert.match(hintText(rows[5]), /真实计费 token/)
 
   // The row opens the choice list inline; the current value carries the check.
   rows[0].props.onClick()
@@ -1040,10 +1044,17 @@ test('SettingsCard keeps its four choice rows mutually exclusive', async () => {
   assert.equal(expandedRows()[4].props['aria-expanded'], true)
   assert.deepEqual(choices().map(textOf), ['DSH 工具桥接', '原生 Agent（满血）'])
 
+  // Click "压缩触发计量" -> the engine panel folds away, only the 2 compaction modes show.
+  expandedRows()[5].props.onClick()
+  await flush()
+  assert.equal(expandedRows()[4].props['aria-expanded'], false)
+  assert.equal(expandedRows()[5].props['aria-expanded'], true)
+  assert.deepEqual(choices().map(textOf), ['按真实账单校准（推荐）', 'DSH 默认字符估算'])
+
   view.unmount()
 })
 
-test('SettingsCard switches the degraded-route level and engine mode live through configure', async () => {
+test('SettingsCard switches the degraded-route level, engine mode, and compaction meter live through configure', async () => {
   const { service, patches } = recordingService()
   const { registered, mount } = loadClientPlugin({ language: 'en-US', remoteService: service })
   const slot = registered.get('settings.section')
@@ -1052,8 +1063,10 @@ test('SettingsCard switches the degraded-route level and engine mode live throug
 
   const degradeRow = () => findAll(view.tree, (node) => node.props && node.props['aria-expanded'] !== undefined)[3]
   const engineRow = () => findAll(view.tree, (node) => node.props && node.props['aria-expanded'] !== undefined)[4]
+  const compactionRow = () => findAll(view.tree, (node) => node.props && node.props['aria-expanded'] !== undefined)[5]
   assert.equal(textOf(degradeRow()), 'Degraded routeRe-answer on 128K truncation')
   assert.equal(textOf(engineRow()), 'Engine modeDSH tool bridge')
+  assert.equal(textOf(compactionRow()), 'Compaction meterReal billed usage (recommended)')
   degradeRow().props.onClick()
   await flush()
   const options = findAll(view.tree, (node) => node.tag === 'button' && node.props['aria-checked'] !== undefined)
@@ -1073,6 +1086,20 @@ test('SettingsCard switches the degraded-route level and engine mode live throug
   await flush()
   assert.deepEqual(JSON.parse(JSON.stringify(patches)), [{ degradeAction: 'observe' }, { engineMode: 'native' }])
   assert.equal(textOf(engineRow()), 'Engine modeNative agent (full strength)')
+
+  compactionRow().props.onClick()
+  await flush()
+  const compactionChoices = findAll(view.tree, (node) => node.tag === 'button' && node.props['aria-checked'] !== undefined)
+  assert.deepEqual(compactionChoices.map(textOf), ['Real billed usage (recommended)', 'DSH heuristic default'])
+  assert.equal(compactionChoices[0].props['aria-checked'], true)
+  compactionChoices[1].props.onClick()
+  await flush()
+  assert.deepEqual(JSON.parse(JSON.stringify(patches)), [
+    { degradeAction: 'observe' },
+    { engineMode: 'native' },
+    { realUsageCompaction: false },
+  ])
+  assert.equal(textOf(compactionRow()), 'Compaction meterDSH heuristic default')
   view.unmount()
 })
 
@@ -1104,13 +1131,14 @@ test('SettingsCard paints status with interactive choice rows while quota is sti
   // The status half is already on screen ...
   assert.match(textOf(view.tree), /已连接/)
   const rows = findAll(view.tree, (node) => node.props && node.props['aria-expanded'] !== undefined)
-  assert.equal(rows.length, 5, 'all five choice rows render before quota resolves')
+  assert.equal(rows.length, 6, 'all six choice rows render before quota resolves')
   assert.deepEqual(rows.map(textOf), [
     '上下文窗口自动 (1M)',
     '默认思考High',
     '超长续写3 段',
     '降智处理128K截断重答',
     '引擎模式DSH 工具桥接',
+    '压缩触发计量按真实账单校准（推荐）',
   ])
   assert.equal(rows.every((row) => row.props.disabled === false), true,
     'a slow quota read must never disable or fade out the choice rows')

@@ -129,6 +129,12 @@ export interface Config {
   degradeAction: Volatile<DegradeAction>
   /** Agent engine mode (`bridge` or `native`); see {@link ENGINE_MODES}. */
   engineMode: Volatile<EngineMode>
+  /**
+   * Calibrate DSH automatic compaction pressure from Antigravity's real billed
+   * token usage when DSH's heuristic character estimate inflates occupancy
+   * (e.g. from historical reasoning blocks that Gemini does not replay).
+   */
+  realUsageCompaction: Volatile<boolean>
 }
 
 function maybeVolatile<T>(schema: T): T {
@@ -172,6 +178,7 @@ export const Config: z<Config> = z.object({
   quotaTtlMs: z.number().step(1).min(5_000).default(300_000),
   degradeAction: maybeVolatile(z.union(DEGRADE_ACTIONS).default('truncation')),
   engineMode: maybeVolatile(z.union(ENGINE_MODES).default('bridge')),
+  realUsageCompaction: maybeVolatile(z.boolean().default(true)),
   // The published schemastery declarations type `.volatile()` fields as plain values.
 }) as unknown as z<Config>
 

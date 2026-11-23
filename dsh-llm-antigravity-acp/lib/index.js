@@ -12,6 +12,7 @@ import { homedir } from 'node:os';
 import { accountVisibleModels, cliEnv } from './accounts.js';
 import { AntigravityAdapter } from './adapter.js';
 import { FALLBACK_MODELS } from './catalog.js';
+import { installRealUsageCompactionCalibrator } from './compaction-calibration.js';
 import { current } from './config.js';
 import { CONFIG_VERSION, migrateConfig, normalizeAccounts, storedEqual } from './migrate.js';
 import { AntigravityRemote, registerRemote } from './remote.js';
@@ -124,6 +125,7 @@ export function apply(ctx, config) {
         visibleModels: config.visibleModels,
         degradeAction: config.degradeAction,
         engineMode: config.engineMode,
+        realUsageCompaction: config.realUsageCompaction,
         displayName: config.displayName,
         modelDisplayNames: config.modelDisplayNames,
     };
@@ -215,6 +217,15 @@ export function apply(ctx, config) {
             configVersion: current(config.configVersion),
             warn: message => ctx.logger.warn(message),
         });
+    });
+    ctx.inject(['tokenMeter'], (meterCtx) => {
+        const tokenMeter = meterCtx.get('tokenMeter');
+        if (tokenMeter === undefined || typeof tokenMeter.measure !== 'function')
+            return;
+        meterCtx.effect(() => installRealUsageCompactionCalibrator(tokenMeter, {
+            provider: config.provider,
+            enabled: () => runtime.realUsageCompaction(),
+        }), 'antigravity-acp: real-usage compaction calibrator');
     });
     registerRemote(ctx);
     ctx.plugin(AntigravityRemote, { runtime, settingsNs });

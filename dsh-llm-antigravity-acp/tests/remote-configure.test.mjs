@@ -232,3 +232,20 @@ test('remote.configure applies and persists engineMode without touching the acco
   assert.equal(writes[0].engineMode, 'native')
   assert.equal(writes[0].accounts, undefined)
 })
+
+test('a configure request carries a live realUsageCompaction boolean and rejects non-booleans', () => {
+  assert.equal(parseConfigureRequest({ realUsageCompaction: true }).realUsageCompaction, true)
+  assert.equal(parseConfigureRequest({ realUsageCompaction: false }).realUsageCompaction, false)
+  assert.equal(Object.hasOwn(parseConfigureRequest({ contextWindow: 0 }), 'realUsageCompaction'), false)
+  assert.throws(() => parseConfigureRequest({ realUsageCompaction: 'true' }), /Invalid antigravity realUsageCompaction/)
+  assert.throws(() => parseConfigureRequest({ realUsageCompaction: 1 }), /Invalid antigravity realUsageCompaction/)
+})
+
+test('remote.configure applies and persists realUsageCompaction without touching the account list', async () => {
+  const { remote, patches, writes } = mountRemote([machineRow()])
+  await remote.configure({ realUsageCompaction: false })
+  assert.deepEqual(patches, [{ realUsageCompaction: false }])
+  assert.equal(writes.length, 1)
+  assert.equal(writes[0].realUsageCompaction, false)
+  assert.equal(writes[0].accounts, undefined)
+})

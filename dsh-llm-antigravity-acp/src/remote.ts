@@ -314,6 +314,10 @@ export function parseConfigureRequest(value: unknown): LiveOverrides {
     if (mode === undefined) throw new TypeError('Invalid antigravity engineMode')
     out.engineMode = mode
   }
+  if (record.realUsageCompaction !== undefined) {
+    if (typeof record.realUsageCompaction !== 'boolean') throw new TypeError('Invalid antigravity realUsageCompaction')
+    out.realUsageCompaction = record.realUsageCompaction
+  }
   if (record.visibleModels !== undefined) out.visibleModels = parseVisibleModels(record.visibleModels, 'Invalid antigravity configure request.visibleModels')
   return out
 }

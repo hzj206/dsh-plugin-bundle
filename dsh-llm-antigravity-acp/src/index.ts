@@ -16,6 +16,7 @@ import { accountVisibleModels, cliEnv } from './accounts.ts'
 import { AntigravityAdapter } from './adapter.ts'
 import type { AcpSpawner } from './acp-process.ts'
 import { FALLBACK_MODELS } from './catalog.ts'
+import { installRealUsageCompactionCalibrator, type TokenMeterLike } from './compaction-calibration.ts'
 import { Config, current, type AccountProfile } from './config.ts'
 import type { ImageResolver } from './history.ts'
 import { CONFIG_VERSION, migrateConfig, normalizeAccounts, storedEqual, type MigrationResult } from './migrate.ts'
@@ -154,6 +155,7 @@ export function apply(ctx: Context, config: Config): void {
     visibleModels: config.visibleModels,
     degradeAction: config.degradeAction,
     engineMode: config.engineMode,
+    realUsageCompaction: config.realUsageCompaction,
     displayName: config.displayName,
     modelDisplayNames: config.modelDisplayNames,
   }
@@ -251,6 +253,15 @@ export function apply(ctx: Context, config: Config): void {
       configVersion: current(config.configVersion),
       warn: message => ctx.logger.warn(message),
     })
+  })
+
+  ctx.inject(['tokenMeter'], (meterCtx) => {
+    const tokenMeter = meterCtx.get('tokenMeter') as TokenMeterLike | undefined
+    if (tokenMeter === undefined || typeof tokenMeter.measure !== 'function') return
+    meterCtx.effect(() => installRealUsageCompactionCalibrator(tokenMeter, {
+      provider: config.provider,
+      enabled: () => runtime.realUsageCompaction(),
+    }), 'antigravity-acp: real-usage compaction calibrator')
   })
 
   registerRemote(ctx)

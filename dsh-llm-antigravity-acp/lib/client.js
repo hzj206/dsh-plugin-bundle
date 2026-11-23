@@ -3273,6 +3273,12 @@ window.__ModuleLoader__.load({
       { value: 'native', label: t('Native agent (full strength)', '原生 Agent（满血）') },
     ]
 
+    /** Compaction trigger calibration: real provider usage vs DSH character heuristic. */
+    const compactionOptions = () => [
+      { value: true, label: t('Real billed usage (recommended)', '按真实账单校准（推荐）') },
+      { value: false, label: t('DSH heuristic default', 'DSH 默认字符估算') },
+    ]
+
     /** Long-decode choices: Antigravity's control over how far one reply may run. */
     const decodeOptions = () => [
       { value: 0, label: t('Off', '关闭') },
@@ -3508,6 +3514,19 @@ window.__ModuleLoader__.load({
               open: openKey === 'engine',
               onToggle: (next) => setOpenKey(next ? 'engine' : null),
               onChange: (v) => void applyPatch({ engineMode: v }),
+            }),
+            h(ChoiceRow, {
+              label: t('Compaction meter', '压缩触发计量'),
+              hint: t(
+                'How automatic context compaction measures usage.\nReal billed usage: calibrates DSH compaction from Gemini’s actual billed tokens so 1M sessions compact near true 80% instead of early heuristic inflation.\nDSH heuristic default: keeps DSH’s built-in character estimate.',
+                '自动上下文压缩如何计算占用率。\n按真实账单校准（推荐）：使用 Antigravity 真实计费 token 校准压缩触发，避免 DSH 把历史思考文本按字符重复估算导致 1M 上下文在约 45% 真实占用时就提前压缩。\nDSH 默认字符估算：保持 DSH 原生估算逻辑。',
+              ),
+              options: compactionOptions(),
+              value: status.realUsageCompaction !== false,
+              disabled: busy,
+              open: openKey === 'compaction',
+              onToggle: (next) => setOpenKey(next ? 'compaction' : null),
+              onChange: (v) => void applyPatch({ realUsageCompaction: v }),
             }))
             : null,
           status ? h(DisplayAliases, { status, client: props.client, onStatus: adoptStatus }) : null,
