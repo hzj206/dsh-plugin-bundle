@@ -1,6 +1,6 @@
 {
   "name": "dsh-llm-antigravity-acp",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "DeepSeek Harness primary model provider driving the local official Antigravity CLI (`agy acp`) over ACP v1 with DSH-owned tools; exposes Gemini and Claude models with per-model context, reasoning efforts, and lock-free subagent concurrency.",
   "keywords": [
     "dsh",

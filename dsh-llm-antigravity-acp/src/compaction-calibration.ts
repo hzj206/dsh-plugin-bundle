@@ -46,7 +46,16 @@ export const MIN_BASELINE_FOR_RATIO_GUARD = 20_000
 export const PRUNE_CREDIT_MIN_RATIO = 0.35
 
 /** Bounded scan window after the latest assistant anchor for `compaction/summary` / newer turns. */
-export const MAX_POST_ANCHOR_EVENT_SCAN = 2_000
+export const MAX_POST_ANCHOR_EVENT_SCAN = 4_000
+
+/**
+ * Maximum consecutive unbilled sibling tool-call steps within the same turn
+ * that may be skipped backward to reach the latest billed `assistant/message`.
+ * In `agy acp`, one LLM generation emitting N parallel tool calls reports
+ * SQLite `gen_metadata` usage on the first tool-call step and leaves sibling
+ * steps unbilled so cumulative session billing is never double-counted.
+ */
+export const MAX_SKIPPED_UNBILLED_TOOL_STEPS = 32
 
 /** Cordis internal symbol that unwraps a `createTraceable` service proxy to its underlying instance. */
 const CORDIS_ORIGINAL = Symbol.for('cordis.original')
@@ -99,8 +108,14 @@ export interface SessionEventLike {
   readonly type?: string
   readonly seq?: number
   readonly data?: {
+    readonly turn?: number
+    readonly step?: number
     readonly usage?: UsageRecord
+    readonly stream?: readonly { readonly type?: string; readonly usage?: UsageRecord }[]
+    readonly shadowedRange?: { readonly start?: number; readonly end?: number }
+    readonly shadowedTokenCount?: number
     readonly message?: {
+      readonly content?: readonly { readonly type?: string }[]
       readonly source?: {
         readonly kind?: string
         readonly provider?: string
@@ -171,6 +186,39 @@ function estimateToolsGrowthTokens(
   }
 }
 
+/** Read provider usage from an assistant event, falling back to the last stream usage chunk. */
+function extractEventUsage(ev: SessionEventLike): UsageRecord | undefined {
+  if (ev.data?.usage !== undefined) return ev.data.usage
+  const stream = ev.data?.stream
+  if (!Array.isArray(stream)) return undefined
+  for (let i = stream.length - 1; i >= 0; i -= 1) {
+    const chunk = stream[i]
+    if (chunk?.type === 'usage' && chunk.usage !== undefined) return chunk.usage
+  }
+  return undefined
+}
+
+/**
+ * Whether an unbilled `assistant/message` is a safe sibling tool-call step
+ * emitted within the same turn on the same provider & model (e.g. parallel
+ * tool calls from a single `agy` LLM generation whose `gen_metadata` usage was
+ * already reported on the first sibling step).
+ */
+function isUnbilledSiblingToolStep(
+  ev: SessionEventLike,
+  provider: string,
+  targetModel: string | undefined,
+): boolean {
+  const source = ev.data?.message?.source
+  if (source?.kind !== 'model' || source.provider !== provider) return false
+  if (targetModel !== undefined && source.model !== undefined && source.model !== targetModel) return false
+  const turn = ev.data?.turn
+  if (typeof turn !== 'number' || !Number.isInteger(turn)) return false
+  const content = ev.data?.message?.content
+  if (!Array.isArray(content) || content.length === 0) return false
+  return content.some(block => block?.type === 'tool-call')
+}
+
 /**
  * Calibrate one `TokenMeter.measure()` snapshot from real Antigravity provider
  * usage while leaving non-Antigravity sessions, model switches, image-heavy
@@ -211,45 +259,104 @@ export function calibrateTokenMeterMeasurement(
       if (prevModel !== undefined && targetModel !== undefined && prevModel !== targetModel) return raw
     }
 
-    // Locate the latest assistant/message currently on the surface. Stop at the
-    // very first match so we never skip past a newer unbilled assistant reply.
+    // Locate the latest billed `assistant/message` currently on the surface.
+    // Skip ONLY unbilled sibling tool-call steps within the exact same turn and
+    // model (parallel tool calls from one `agy` generation whose usage was
+    // reported on the first sibling step so billing is never double-counted).
+    // Any unbilled final text reply, cross-turn unbilled reply, or model switch
+    // immediately aborts and returns `raw`.
     let anchorIdx = -1
     let anchorSeq = -1
     let anchorEvent: SessionEventLike | undefined
+    let anchorUsage: UsageRecord | undefined
+    let skippedTurn: number | undefined
+    const skippedUnbilledSeqs = new Set<number>()
+
     for (let i = raw.nodes.length - 1; i >= 0; i -= 1) {
       const node = raw.nodes[i]
       if (node === undefined) continue
       const ev = session.eventAt(node.seq)
-      if (ev?.type === 'assistant/message') {
+      if (ev?.type !== 'assistant/message') continue
+
+      const candidateUsage = extractEventUsage(ev)
+      const candidateTotal = realUsageTotal(candidateUsage)
+      if (candidateTotal > 0 && candidateUsage !== undefined) {
+        if (skippedTurn !== undefined && ev.data?.turn !== skippedTurn) {
+          return raw
+        }
         anchorIdx = i
         anchorSeq = node.seq
         anchorEvent = ev
+        anchorUsage = candidateUsage
         break
       }
+
+      if (
+        skippedUnbilledSeqs.size >= MAX_SKIPPED_UNBILLED_TOOL_STEPS
+        || !isUnbilledSiblingToolStep(ev, options.provider, targetModel)
+      ) {
+        return raw
+      }
+      const evTurn = ev.data!.turn as number
+      if (skippedTurn === undefined) {
+        skippedTurn = evTurn
+      } else if (skippedTurn !== evTurn) {
+        return raw
+      }
+      skippedUnbilledSeqs.add(node.seq)
     }
-    if (anchorIdx < 0 || anchorEvent === undefined) return raw
+    if (anchorIdx < 0 || anchorEvent === undefined || anchorUsage === undefined) return raw
 
     const source = anchorEvent.data?.message?.source
     if (source?.kind !== 'model' || source.provider !== options.provider) return raw
     if (targetModel !== undefined && source.model !== undefined && source.model !== targetModel) return raw
 
-    const usage = anchorEvent.data?.usage
-    const usageTotal = realUsageTotal(usage)
+    const usageTotal = realUsageTotal(anchorUsage)
     if (usageTotal <= 0) return raw
 
     // Post-compaction & newer-assistant convergence guard:
     // If a `compaction/summary` landed after the anchor, return `raw` verbatim
     // so `dsh-compaction-basic` sees the freshly compacted heuristic surface
-    // and converges immediately on attempt 1. Likewise, if a newer empty/unbilled
-    // `assistant/message` exists beyond the surface anchor, defer to `raw`.
+    // and converges immediately on attempt 1. Likewise, if any newer
+    // `assistant/message` other than the explicitly verified same-turn sibling
+    // tool-call steps exists after the anchor (e.g. an off-surface reply),
+    // defer to `raw`.
     const endSeq = typeof session.seq === 'number' && Number.isInteger(session.seq)
       ? session.seq
       : raw.logRevision
     if (typeof endSeq !== 'number' || !Number.isInteger(endSeq) || endSeq <= anchorSeq) return raw
     if (endSeq - anchorSeq > MAX_POST_ANCHOR_EVENT_SCAN) return raw
+
+    let nodeIndexBySeq: Map<number, number> | undefined
+    let prunedBeforeAnchor = 0
     for (let s = anchorSeq + 1; s < endSeq; s += 1) {
       const ev = session.eventAt(s)
-      if (ev?.type === 'compaction/summary' || ev?.type === 'assistant/message') return raw
+      if (ev?.type === 'compaction/summary') return raw
+      if (ev?.type === 'assistant/message' && !skippedUnbilledSeqs.has(s)) return raw
+      if (skippedUnbilledSeqs.size > 0 && ev?.type === 'compaction/prune') {
+        if (nodeIndexBySeq === undefined) {
+          nodeIndexBySeq = new Map()
+          for (let idx = 0; idx < raw.nodes.length; idx += 1) {
+            const n = raw.nodes[idx]
+            if (n !== undefined) nodeIndexBySeq.set(n.seq, idx)
+          }
+        }
+        // `tool-result-pruner` appends the replacement `tool/result` at `s + 1`.
+        const repIdx = nodeIndexBySeq.get(s + 1)
+        if (repIdx !== undefined && repIdx < anchorIdx) {
+          const shadowed = ev.data?.shadowedTokenCount
+          const replaced = raw.nodes[repIdx]?.tokens
+          if (
+            typeof shadowed === 'number'
+            && Number.isFinite(shadowed)
+            && typeof replaced === 'number'
+            && Number.isFinite(replaced)
+            && shadowed > replaced
+          ) {
+            prunedBeforeAnchor += shadowed - replaced
+          }
+        }
+      }
     }
 
     let postAnchorTokens = 0
@@ -260,13 +367,23 @@ export function calibrateTokenMeterMeasurement(
       }
     }
 
-    // When `dsh-token-meter` fell into its header-mismatch branch (e.g. effort
-    // or tools changed on the same model), `raw.surfaceDeltaTokens` is 0 and
-    // `raw.baseline.tokens` already includes `postAnchorTokens`.
-    const headerRepriced = raw.surfaceDeltaTokens === 0 && postAnchorTokens > 0
-    const estimatedAnchor = headerRepriced
-      ? Math.max(0, raw.baseline.tokens - postAnchorTokens)
-      : raw.baseline.tokens
+    let estimatedAnchor: number
+    if (skippedUnbilledSeqs.size > 0) {
+      // When we walked back past unbilled sibling tool-call steps, `raw.baseline`
+      // was anchored by `TokenMeter` on the newer unbilled step, so reconstruct
+      // the pre-prune heuristic anchor directly from `raw.totalTokens === tools + surfaceTokens`.
+      const toolsTokens = Math.max(0, raw.totalTokens - raw.surfaceTokens)
+      const surfaceAtAnchor = Math.max(0, raw.surfaceTokens - postAnchorTokens)
+      estimatedAnchor = toolsTokens + surfaceAtAnchor + prunedBeforeAnchor
+    } else {
+      // When `dsh-token-meter` fell into its header-mismatch branch (e.g. effort
+      // or tools changed on the same model), `raw.surfaceDeltaTokens` is 0 and
+      // `raw.baseline.tokens` already includes `postAnchorTokens`.
+      const headerRepriced = raw.surfaceDeltaTokens === 0 && postAnchorTokens > 0
+      estimatedAnchor = headerRepriced
+        ? Math.max(0, raw.baseline.tokens - postAnchorTokens)
+        : raw.baseline.tokens
+    }
 
     // Reject suspiciously low provider usage (e.g. upstream 128K silent
     // context truncation on a large session) so we never delay compaction on a
@@ -283,7 +400,11 @@ export function calibrateTokenMeterMeasurement(
       : 1
 
     let delta: number
-    if (raw.surfaceDeltaTokens < 0) {
+    if (skippedUnbilledSeqs.size > 0) {
+      // Unbilled sibling tool-call steps + subsequent tool results keep full 1.0x
+      // heuristic weight; any pre-anchor tool-result pruning is credited conservatively.
+      delta = postAnchorTokens - Math.round(prunedBeforeAnchor * ratio) + estimateToolsGrowthTokens(sessionHeader, requestHeader)
+    } else if (raw.surfaceDeltaTokens < 0) {
       // Tool-result pruning or image offload shrunk the surface: credit the
       // savings conservatively using the observed real/heuristic ratio.
       delta = Math.round(raw.surfaceDeltaTokens * ratio)
@@ -298,7 +419,7 @@ export function calibrateTokenMeterMeasurement(
     }
 
     const calibratedTotal = Math.max(0, Math.min(raw.totalTokens, usageTotal + delta))
-    const frozenUsage = Object.freeze({ ...usage! })
+    const frozenUsage = Object.freeze({ ...anchorUsage })
     return Object.freeze({
       ...raw,
       baseline: Object.freeze({

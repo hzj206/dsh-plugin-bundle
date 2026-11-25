@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { Context, Service } from '@deepseek-ai/cordis'
 import {
+  MAX_SKIPPED_UNBILLED_TOOL_STEPS,
   MIN_REAL_TO_HEURISTIC_RATIO,
   PRUNE_CREDIT_MIN_RATIO,
   calibrateTokenMeterMeasurement,
@@ -494,4 +495,251 @@ test('AntigravityRuntime exposes live realUsageCompaction toggle via volatile co
     await runtime.dispose()
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('unbilled same-turn parallel tool-call steps keep calibration anchored to the latest billed step', () => {
+  const threshold = Math.floor(1_048_576 * 0.8) // 838,860
+  // Reproduces real session-6335de7c seq 15489 -> 15499 -> 15503:
+  // Step 72 (seq 1) billed 449,816 tokens; sibling parallel tool-call Step 73 (seq 3)
+  // arrived ~2s later with usage=undefined while DSH heuristic crossed 840K.
+  const events = [
+    { type: 'user/message', seq: 0 },
+    {
+      type: 'assistant/message',
+      seq: 1,
+      data: {
+        turn: 61,
+        step: 72,
+        usage: { inputTokens: 6_253, cacheReadTokens: 442_249, outputTokens: 1_314, reasoningTokens: 120 },
+        message: {
+          role: 'assistant',
+          content: [{ type: 'reasoning', text: 'plan' }, { type: 'tool-call', name: 'edit' }],
+          source: { kind: 'model', provider: 'antigravity', model: 'gemini-pro-orchestrator-neon' },
+        },
+      },
+    },
+    { type: 'tool/result', seq: 2 },
+    {
+      type: 'assistant/message',
+      seq: 3,
+      data: {
+        turn: 61,
+        step: 73,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'tool-call', name: 'edit' }],
+          source: { kind: 'model', provider: 'antigravity', model: 'gemini-pro-orchestrator-neon' },
+        },
+      },
+    },
+    { type: 'tool/result', seq: 4 },
+  ]
+  const session = makeSession({ model: 'gemini-pro-orchestrator-neon', events })
+  const header = session.requestHeader()
+  // TokenMeter anchored on unbilled seq 3 -> baseline=839,500 (tools 36K + surface up to seq 3 = 803.5K), delta=32.
+  const raw = makeRaw({
+    baseline: { kind: 'estimated', tokens: 839_500 },
+    surfaceDeltaTokens: 32,
+    surfaceTokens: 803_532,
+    nodes: [
+      { seq: 0, tokens: 10_000, heuristicTokens: 10_000 },
+      { seq: 1, tokens: 793_100, heuristicTokens: 793_100 },
+      { seq: 2, tokens: 32, heuristicTokens: 32 },
+      { seq: 3, tokens: 368, heuristicTokens: 368 },
+      { seq: 4, tokens: 32, heuristicTokens: 32 },
+    ],
+    logRevision: 5,
+  })
+  assert.ok(raw.totalTokens >= threshold)
+
+  const calibrated = calibrateTokenMeterMeasurement(raw, session, header, {
+    provider: 'antigravity',
+    enabled: () => true,
+  })
+  assert.equal(calibrated.baseline.kind, 'usage')
+  assert.equal(calibrated.baseline.tokens, 449_816)
+  // postAnchorTokens = seq 2 (32) + seq 3 (368) + seq 4 (32) = 432 at full 1.0x weight.
+  assert.equal(calibrated.surfaceDeltaTokens, 432)
+  assert.equal(calibrated.totalTokens, 450_248)
+  assert.ok(calibrated.totalTokens < threshold, '43% real usage must not trigger compaction on unbilled sibling tool-call step')
+
+  // Multi-step burst (5 consecutive unbilled same-turn tool calls) + pre-anchor compaction/prune credits prune conservatively.
+  const burstEvents = [
+    { type: 'user/message', seq: 0 },
+    { type: 'tool/result', seq: 1 }, // later pruned at seq 14 -> replaced by seq 15
+    {
+      type: 'assistant/message',
+      seq: 2,
+      data: {
+        turn: 70,
+        step: 1,
+        usage: { inputTokens: 10_000, cacheReadTokens: 820_000, outputTokens: 10_000 }, // 840K
+        message: {
+          role: 'assistant',
+          content: [{ type: 'tool-call', name: 'read' }],
+          source: { kind: 'model', provider: 'antigravity', model: 'gemini-4-neon' },
+        },
+      },
+    },
+  ]
+  const burstNodes = [
+    { seq: 0, tokens: 10_000, heuristicTokens: 10_000 },
+    { seq: 15, tokens: 2_000, heuristicTokens: 2_000 }, // replaced seq 1 (was 102_000 => saved 100_000)
+    { seq: 2, tokens: 1_248_000, heuristicTokens: 1_248_000 },
+  ]
+  for (let k = 0; k < 5; k += 1) {
+    const trSeq = 3 + k * 2
+    const asSeq = 4 + k * 2
+    burstEvents.push({ type: 'tool/result', seq: trSeq })
+    burstNodes.push({ seq: trSeq, tokens: 100, heuristicTokens: 100 })
+    burstEvents.push({
+      type: 'assistant/message',
+      seq: asSeq,
+      data: {
+        turn: 70,
+        step: 2 + k,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'tool-call', name: 'read' }],
+          source: { kind: 'model', provider: 'antigravity', model: 'gemini-4-neon' },
+        },
+      },
+    })
+    burstNodes.push({ seq: asSeq, tokens: 100, heuristicTokens: 100 })
+  }
+  burstEvents.push({ type: 'tool/result', seq: 13 })
+  burstNodes.push({ seq: 13, tokens: 100, heuristicTokens: 100 })
+  // Pre-anchor prune at seq 14 + replacement tool/result at seq 15 (shadowed 102,000 -> replaced 2,000 = 100,000 saved)
+  burstEvents.push({ type: 'compaction/prune', seq: 14, data: { shadowedRange: { start: 1, end: 1 }, shadowedTokenCount: 102_000 } })
+  burstEvents.push({ type: 'tool/result', seq: 15 })
+
+  const burstSession = makeSession({ model: 'gemini-4-neon', events: burstEvents })
+  const burstSurface = burstNodes.reduce((acc, n) => acc + n.tokens, 0) // 1,261,100
+  const burstTools = 40_000
+  // prePruneEstimatedAnchor = 40_000 (tools) + 1_260_000 (surfaceAtAnchor) + 100_000 (pruned) = 1_400_000
+  // ratio = 840_000 / 1_400_000 = 0.60 => prune credit = -60_000; postAnchorTokens = 1_100 => delta = -58_900 => 781_100.
+  const rawBurst = makeRaw({
+    baseline: { kind: 'estimated', tokens: burstTools + burstSurface },
+    surfaceDeltaTokens: 0,
+    surfaceTokens: burstSurface,
+    nodes: burstNodes,
+    logRevision: burstEvents.length,
+  })
+  const calBurst = calibrateTokenMeterMeasurement(rawBurst, burstSession, burstSession.requestHeader(), {
+    provider: 'antigravity',
+    enabled: () => true,
+  })
+  assert.equal(calBurst.baseline.tokens, 840_000)
+  assert.equal(calBurst.surfaceDeltaTokens, -58_900)
+  assert.equal(calBurst.totalTokens, 781_100)
+  assert.ok(calBurst.totalTokens < threshold, 'pre-anchor prune credit brings real occupancy below 80% even after unbilled sibling steps')
+})
+
+test('unbilled step safety boundaries: refuses cross-turn, non-tool-call, post-compaction, and over-cap unbilled streaks', () => {
+  // 1. Cross-turn unbilled tool-call step (turn 62 vs billed turn 61) -> returns raw.
+  const crossTurnEvents = [
+    { type: 'user/message', seq: 0 },
+    {
+      type: 'assistant/message',
+      seq: 1,
+      data: {
+        turn: 61,
+        usage: { inputTokens: 6_000, cacheReadTokens: 440_000, outputTokens: 1_000 },
+        message: { role: 'assistant', content: [{ type: 'tool-call', name: 'edit' }], source: { kind: 'model', provider: 'antigravity', model: 'gemini-4-neon' } },
+      },
+    },
+    {
+      type: 'assistant/message',
+      seq: 2,
+      data: {
+        turn: 62,
+        message: { role: 'assistant', content: [{ type: 'tool-call', name: 'edit' }], source: { kind: 'model', provider: 'antigravity', model: 'gemini-4-neon' } },
+      },
+    },
+  ]
+  const rawCross = makeRaw({
+    nodes: [
+      { seq: 0, tokens: 10_000, heuristicTokens: 10_000 },
+      { seq: 1, tokens: 800_000, heuristicTokens: 800_000 },
+      { seq: 2, tokens: 1_000, heuristicTokens: 1_000 },
+    ],
+    surfaceTokens: 811_000,
+    logRevision: 3,
+  })
+  const crossSession = makeSession({ events: crossTurnEvents })
+  assert.equal(
+    calibrateTokenMeterMeasurement(rawCross, crossSession, crossSession.requestHeader(), { provider: 'antigravity', enabled: () => true }),
+    rawCross,
+  )
+
+  // 2. Same-turn unbilled final text reply (no tool-call block) -> returns raw.
+  const textOnlyEvents = [
+    { type: 'user/message', seq: 0 },
+    crossTurnEvents[1],
+    {
+      type: 'assistant/message',
+      seq: 2,
+      data: {
+        turn: 61,
+        message: { role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'antigravity', model: 'gemini-4-neon' } },
+      },
+    },
+  ]
+  const textSession = makeSession({ events: textOnlyEvents })
+  assert.equal(
+    calibrateTokenMeterMeasurement(rawCross, textSession, textSession.requestHeader(), { provider: 'antigravity', enabled: () => true }),
+    rawCross,
+  )
+
+  // 3. Stream-embedded usage fallback when top-level data.usage is omitted.
+  const streamUsageEvents = [
+    { type: 'user/message', seq: 0 },
+    {
+      type: 'assistant/message',
+      seq: 1,
+      data: {
+        turn: 61,
+        stream: [{ type: 'usage', usage: { inputTokens: 5_000, cacheReadTokens: 445_000, outputTokens: 1_000 } }],
+        message: { role: 'assistant', content: [{ type: 'tool-call', name: 'edit' }], source: { kind: 'model', provider: 'antigravity', model: 'gemini-4-neon' } },
+      },
+    },
+    { type: 'tool/result', seq: 2 },
+  ]
+  const streamSession = makeSession({ events: streamUsageEvents })
+  const calStream = calibrateTokenMeterMeasurement(makeRaw(), streamSession, streamSession.requestHeader(), { provider: 'antigravity', enabled: () => true })
+  assert.equal(calStream.baseline.kind, 'usage')
+  assert.equal(calStream.baseline.tokens, 451_000)
+  assert.equal(calStream.totalTokens, 453_000)
+
+  // 4. Exceeding MAX_SKIPPED_UNBILLED_TOOL_STEPS returns raw.
+  const overCapEvents = [
+    { type: 'user/message', seq: 0 },
+    crossTurnEvents[1],
+  ]
+  const overCapNodes = [
+    { seq: 0, tokens: 10_000, heuristicTokens: 10_000 },
+    { seq: 1, tokens: 800_000, heuristicTokens: 800_000 },
+  ]
+  for (let i = 0; i <= MAX_SKIPPED_UNBILLED_TOOL_STEPS; i += 1) {
+    const seq = 2 + i
+    overCapEvents.push({
+      type: 'assistant/message',
+      seq,
+      data: {
+        turn: 61,
+        message: { role: 'assistant', content: [{ type: 'tool-call', name: 'read' }], source: { kind: 'model', provider: 'antigravity', model: 'gemini-4-neon' } },
+      },
+    })
+    overCapNodes.push({ seq, tokens: 100, heuristicTokens: 100 })
+  }
+  const overCapSession = makeSession({ events: overCapEvents })
+  const rawOverCap = makeRaw({
+    nodes: overCapNodes,
+    surfaceTokens: overCapNodes.reduce((a, n) => a + n.tokens, 0),
+    logRevision: overCapEvents.length,
+  })
+  assert.equal(
+    calibrateTokenMeterMeasurement(rawOverCap, overCapSession, overCapSession.requestHeader(), { provider: 'antigravity', enabled: () => true }),
+    rawOverCap,
+  )
 })
