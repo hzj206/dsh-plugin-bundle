@@ -844,10 +844,10 @@ test('SettingsCard renders live settings as value rows that apply the chosen opt
   rows[0].props.onClick()
   await flush()
   const options = findAll(view.tree, (node) => node.tag === 'button' && node.props['aria-checked'] !== undefined)
-  assert.deepEqual(options.map(textOf), ['自动 (1M)', '900K', '512K', '256K'])
+  assert.deepEqual(options.map(textOf), ['自动 (1M)', '1M', '900K', '512K', '256K'])
   assert.equal(options[0].props['aria-checked'], true)
 
-  options[2].props.onClick()
+  options[3].props.onClick()
   await flush()
   assert.deepEqual(JSON.parse(JSON.stringify(patches)), [{ contextWindow: 512000 }])
   assert.match(textOf(findAll(view.tree, (node) => node.props && node.props['aria-expanded'] !== undefined)[0]), /上下文窗口512K/)
@@ -877,9 +877,9 @@ test('composer parameter rows expose the same live settings for Antigravity only
   rows[0].props.onClick()
   await flush()
   const options = findAll(view.tree, (node) => node.props.role === 'menuitemradio')
-  assert.deepEqual(options.map(textOf), ['自动 (1M)', '900K', '512K', '256K'])
+  assert.deepEqual(options.map(textOf), ['自动 (1M)', '1M', '900K', '512K', '256K'])
   assert.equal(options[0].props['aria-checked'], true)
-  options[1].props.onClick()
+  options[2].props.onClick()
   await flush()
   assert.deepEqual(JSON.parse(JSON.stringify(patches)), [{ contextWindow: 900000 }])
   assert.match(textOf(findAll(view.tree, (node) => node.props.role === 'menuitem')[0]), /900K/)
@@ -914,10 +914,10 @@ test('ModelParameterRows keeps the two panels mutually exclusive (accordion)', a
   const menuRows = () => findAll(view.tree, (node) => node.props && node.props.role === 'menuitem')
   const radios = () => findAll(view.tree, (node) => node.props && node.props.role === 'menuitemradio')
 
-  // Opening "上下文" renders its 4 choices and leaves "超长续写" collapsed.
+  // Opening "上下文" renders its 5 choices and leaves "超长续写" collapsed.
   menuRows()[0].props.onClick()
   await flush()
-  assert.equal(radios().length, 4)
+  assert.equal(radios().length, 5)
   assert.equal(menuRows()[0].props['aria-expanded'], true)
   assert.equal(menuRows()[1].props['aria-expanded'], false)
 
@@ -946,7 +946,7 @@ test('ModelParameterRows collapses on outside pointerdown and on the first Escap
   // A pointerdown outside the list closes the expanded panel.
   menuRows()[0].props.onClick()
   await flush()
-  assert.equal(radios().length, 4)
+  assert.equal(radios().length, 5)
   document.dispatch('pointerdown', { target: {} })
   assert.equal(radios().length, 0)
   assert.equal(menuRows()[0].props['aria-expanded'], false)
@@ -984,7 +984,7 @@ test('ModelParameterRows collapses on outside pointerdown and on the first Escap
   // stayed on the outer ModelSelect trigger button.
   menuRows()[0].props.onClick()
   await flush()
-  assert.equal(radios().length, 4)
+  assert.equal(radios().length, 5)
   document.dispatch('keydown', {
     key: 'Escape',
     preventDefault() { prevented += 1 },
@@ -1008,10 +1008,10 @@ test('SettingsCard keeps its four choice rows mutually exclusive', async () => {
   const expandedRows = () => findAll(view.tree, (node) => node.props && node.props['aria-expanded'] !== undefined)
   const choices = () => findAll(view.tree, (node) => node.tag === 'button' && node.props['aria-checked'] !== undefined)
 
-  // Open "上下文窗口" -> its 4 window choices are shown.
+  // Open "上下文窗口" -> its 5 window choices are shown.
   expandedRows()[0].props.onClick()
   await flush()
-  assert.equal(choices().length, 4)
+  assert.equal(choices().length, 5)
   assert.equal(expandedRows()[0].props['aria-expanded'], true)
 
   // Click "默认思考" -> the window panel folds away, only the 4 efforts show.
@@ -2766,4 +2766,306 @@ test('D6 UI: Re-login on an already signed-in account stays open, supports Enter
   assert.match(textOf(workCard()), /已登录 work-fresh@example\.com/)
 
   view.unmount()
+})
+
+test('SettingsCard offers explicit 1M window, labels locked Auto honestly, and renders upstream open model chips + authError on AccountCard', async () => {
+  const patches = []
+  let currentWindow = 0
+  const rows = [
+    {
+      id: 'default',
+      label: 'This Mac',
+      system: true,
+      enabled: true,
+      state: 'ready',
+      sessions: 1,
+      email: 'pro@example.com',
+      subscriptionTier: 'PRO',
+      subscriptionName: 'Google AI Pro',
+      argonSharedWithGemini: true,
+      entitledModels: [
+        { id: 'gemini-4-neon', name: 'Gemini 4 Neon' },
+        { id: 'gemini-4-carbon', name: 'Gemini 4 Carbon' },
+        { id: 'gemini-4-argon', name: 'Gemini 4 Argon' },
+        { id: 'gemini-4-hydrogen', name: 'Gemini 4 Hydrogen' },
+        { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' },
+        { id: 'claude-opus-5-5', name: 'Claude Opus 5.5' },
+        { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5' },
+        { id: 'gpt-oss-120b-medium', name: 'GPT-OSS 120B (Medium)' },
+      ],
+      availableModels: [
+        { id: 'gemini-4-neon', name: 'Gemini 4 Neon', enabled: true },
+        { id: 'gemini-4-argon', name: 'Gemini 4 Argon', enabled: true },
+      ],
+      visibleModels: [],
+      priority: 1,
+      weight: 1,
+    },
+    {
+      id: 'acc-expired',
+      label: 'Expired Free',
+      system: false,
+      enabled: false,
+      state: 'idle',
+      sessions: 0,
+      email: 'expired@example.com',
+      subscriptionTier: 'FREE',
+      subscriptionName: 'Antigravity Starter Quota',
+      authError: 'Antigravity OAuth token expired or revoked (HTTP 401)',
+      entitledModels: [
+        { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' },
+      ],
+      disabledModels: ['gemini-4-argon'],
+      visibleModels: [],
+      priority: 3,
+      weight: 1,
+    },
+  ]
+  const snapshot = () => ({
+    state: 'ready',
+    version: '1.5.16',
+    unlock: { status: 'locked', applied: false, detail: 'unlock script missing' },
+    contextWindow: currentWindow > 0 ? currentWindow : 256_000,
+    configuredContextWindow: currentWindow,
+    defaultEffort: 'high',
+    longDecodeContinuations: 3,
+    degradeAction: 'truncation',
+    engineMode: 'bridge',
+    realUsageCompaction: true,
+    models: rows[0].entitledModels,
+    availableModels: rows[0].entitledModels.map((m) => ({ ...m, enabled: true })),
+    visibleModels: [],
+    accounts: rows,
+  })
+
+  const { registered, mount } = loadClientPlugin({
+    language: 'zh-CN',
+    remoteService: {
+      status: async () => snapshot(),
+      accounts: async () => rows,
+      configure: async (patch) => {
+        patches.push(patch)
+        if ('contextWindow' in patch) currentWindow = patch.contextWindow
+        return snapshot()
+      },
+      quota: async () => ({
+        status: 'ok',
+        subscriptionTier: 'PRO',
+        subscriptionName: 'Google AI Pro',
+        argonSharedWithGemini: true,
+        availableModels: rows[0].entitledModels,
+        groups: [
+          {
+            kind: 'gemini',
+            name: 'Gemini 4 Neon / Carbon / Argon / Hydrogen / 3.8',
+            description: 'Models within this group: Gemini 4 Neon, Gemini 4 Carbon, Gemini 4 Argon, Gemini 4 Hydrogen, Gemini 3.8 Flash',
+            buckets: [{ id: 'gemini-weekly', window: 'weekly', remainingFraction: 0.93, resetTime: '2026-12-02T01:59:13Z' }],
+          },
+        ],
+      }),
+    },
+  })
+
+  const slot = registered.get('settings.section')
+  const view = mount(slot.Component, slot.meta.inject())
+  await flush()
+
+  // Locked binary shows honest warning tag and Auto (256K · locked) label, plus explicit 1M option
+  assert.ok(findOne(view.tree, (n) => n.props && n.props['data-agy-unlock'] === 'locked'))
+  const windowRow = findAll(view.tree, (n) => n.props && n.props['aria-expanded'] !== undefined)[0]
+  assert.match(textOf(windowRow), /自动 \(256K · 未解锁\)/)
+  windowRow.props.onClick()
+  await flush()
+  const opts = findAll(view.tree, (n) => n.tag === 'button' && n.props['aria-checked'] !== undefined)
+  assert.deepEqual(opts.map(textOf), ['自动 (256K · 未解锁)', '1M', '900K', '512K', '256K'])
+  opts[1].props.onClick()
+  await flush()
+  assert.deepEqual(JSON.parse(JSON.stringify(patches)), [{ contextWindow: 1048576 }])
+  assert.match(textOf(findAll(view.tree, (n) => n.props && n.props['aria-expanded'] !== undefined)[0]), /上下文窗口1M/)
+
+  // Default account card immediately displays all 8 upstream open models without opening Quota drawer
+  const defaultCard = findOne(view.tree, (n) => n.props && n.props['data-agy-account'] === 'default')
+  const defaultChips = findAll(defaultCard, (n) => n.props && 'data-agy-model-chip' in n.props)
+  assert.equal(defaultChips.length, 8)
+  assert.ok(defaultChips.some((c) => c.props['data-agy-model-chip'] === 'gemini-4-argon'))
+
+  // Expanding Quota drawer labels the multi-model Gemini 4 pool as Gemini 4 / 3.8 额度
+  findOne(defaultCard, (n) => n.tag === 'button' && textOf(n) === '额度').props.onClick()
+  await flush()
+  const updatedDefault = findOne(view.tree, (n) => n.props && n.props['data-agy-account'] === 'default')
+  assert.match(textOf(updatedDefault), /Gemini 4 \/ 3\.8 额度/)
+
+  // Expired account card surfaces Token expired badge, auth banner, and disabled model chip
+  const expiredCard = findOne(view.tree, (n) => n.props && n.props['data-agy-account'] === 'acc-expired')
+  assert.ok(findOne(expiredCard, (n) => n.props && n.props['data-agy-auth-badge'] === 'true'))
+  assert.ok(findOne(expiredCard, (n) => n.props && n.props['data-agy-health-banner'] === 'auth'))
+  assert.ok(findOne(expiredCard, (n) => n.props && n.props['data-agy-model-disabled'] === 'gemini-4-argon'))
+
+  view.unmount()
+})
+
+test('AccountCard with empty entitledModels never borrows provider catalog and recheckAccount surfaces quota errors', async () => {
+  const rows = [
+    {
+      id: 'acc-free-expired',
+      label: 'Expired Free',
+      system: false,
+      enabled: false,
+      state: 'idle',
+      sessions: 0,
+      email: 'free@example.com',
+      subscriptionTier: 'FREE',
+      subscriptionName: 'Antigravity Starter Quota',
+      authError: 'Antigravity OAuth token expired or revoked (HTTP 401)',
+      entitledModels: [],
+      availableModels: [
+        { id: 'gemini-4-neon', name: 'Gemini 4 Neon', enabled: true },
+        { id: 'claude-opus-5-5', name: 'Claude Opus 5.5', enabled: true },
+      ],
+      visibleModels: [],
+      priority: 3,
+      weight: 1,
+    },
+  ]
+  const snap = {
+    state: 'ready',
+    version: '1.5.16',
+    contextWindow: 1_048_576,
+    configuredContextWindow: 0,
+    defaultEffort: 'high',
+    longDecodeContinuations: 3,
+    models: [{ id: 'gemini-4-neon', name: 'Gemini 4 Neon' }],
+    availableModels: [{ id: 'gemini-4-neon', name: 'Gemini 4 Neon', enabled: true }],
+    visibleModels: [],
+    accounts: rows,
+  }
+  const { registered, mount } = loadClientPlugin({
+    language: 'zh-CN',
+    remoteService: {
+      status: async () => snap,
+      accounts: async () => rows,
+      recheckAccount: async () => ({
+        status: snap,
+        quota: { status: 'error', groups: [], error: 'Antigravity OAuth token expired or revoked (HTTP 401)' },
+      }),
+    },
+  })
+
+  const slot = registered.get('settings.section')
+  const view = mount(slot.Component, slot.meta.inject())
+  await flush()
+
+  const card = findOne(view.tree, (n) => n.props && n.props['data-agy-account'] === 'acc-free-expired')
+  assert.equal(findAll(card, (n) => n.props && 'data-agy-model-chip' in n.props).length, 0,
+    'explicit empty entitledModels must not leak provider PRO catalog onto unprobed FREE account')
+
+  // Clicking 重新检测 on a 401 account reports error instead of falsely saying healthy
+  const recheckBtn = findOne(card, (n) => n.props && n.props['data-agy-recheck-btn'] === 'acc-free-expired')
+  assert.ok(recheckBtn)
+  recheckBtn.props.onClick()
+  await flush()
+  const updatedCard = findOne(view.tree, (n) => n.props && n.props['data-agy-account'] === 'acc-free-expired')
+  assert.match(textOf(updatedCard), /HTTP 401/)
+  assert.doesNotMatch(textOf(updatedCard), /重新检测通过/)
+
+  view.unmount()
+})
+
+test('QuotaPill blocks switching into suspended/expired accounts with badge, AccountCard hides Set default, and AccountEditorModal exports backup path', async () => {
+  const calls = []
+  const rows = [
+    {
+      id: 'default', label: 'Primary', system: true, enabled: true, active: true,
+      state: 'ready', sessions: 1, email: 'primary@example.com', hasRefreshToken: true,
+      subscriptionTier: 'PRO', subscriptionName: 'Google AI Pro',
+      env: {}, home: '', contextWindow: 0, visibleModels: [], priority: 1, weight: 1, cooldowns: [],
+    },
+    {
+      id: 'acc-tos', label: 'Suspended', system: false, enabled: false, active: false,
+      state: 'idle', sessions: 0, email: 'tos@example.com', hasRefreshToken: true,
+      tosSuspended: true,
+      env: {}, home: '', contextWindow: 0, visibleModels: [], priority: 2, weight: 1, cooldowns: [],
+    },
+    {
+      id: 'acc-expired', label: 'Expired', system: false, enabled: false, active: false,
+      state: 'idle', sessions: 0, email: 'expired@example.com', hasRefreshToken: true,
+      authError: 'OAuth token expired or revoked (HTTP 401)',
+      env: {}, home: '', contextWindow: 0, visibleModels: [], priority: 3, weight: 1, cooldowns: [],
+    },
+  ]
+  const snap = {
+    state: 'ready', version: '1.5.16', platform: 'win32', activeAccountId: 'default',
+    contextWindow: 1_048_576, configuredContextWindow: 0, defaultEffort: 'high', longDecodeContinuations: 3,
+    models: [{ id: 'gemini-4-neon', name: 'Gemini 4 Neon' }],
+    availableModels: [{ id: 'gemini-4-neon', name: 'Gemini 4 Neon', enabled: true }],
+    visibleModels: [], accounts: rows,
+  }
+  const { registered, mount } = loadClientPlugin({
+    language: 'zh-CN',
+    remoteService: {
+      status: async () => snap,
+      accounts: async () => rows,
+      quota: async () => ({ status: 'ok', accountId: 'default', groups: [] }),
+      switchAccount: async (req) => { calls.push({ method: 'switchAccount', req }); return snap },
+      exportCredential: async (req) => {
+        calls.push({ method: 'exportCredential', req })
+        return {
+          accountId: req.accountId,
+          email: 'primary@example.com',
+          filePath: 'C:\\cache\\credential-backups\\primary_example.com-2026-11-25.json',
+          hasRefreshToken: true,
+          exportedAt: '2026-11-25T06:00:00.000Z',
+        }
+      },
+    },
+  })
+
+  // 1. QuotaPill disables switching into ToS-suspended and auth-expired rows and shows 凭据失效 badge
+  const pillSlot = registered.get('conversation.input.right')
+  const pillView = mount(pillSlot.Component, pillSlot.meta.inject('sess-ui-guard'))
+  await flush()
+  const trigger = findOne(pillView.tree, (n) => n.tag === 'button')
+  assert.ok(trigger)
+  trigger.props.onClick()
+  await flush()
+
+  const tosRow = findOne(pillView.tree, (n) => n.props && n.props['data-agy-pill-switch-account'] === 'acc-tos')
+  const expRow = findOne(pillView.tree, (n) => n.props && n.props['data-agy-pill-switch-account'] === 'acc-expired')
+  assert.equal(tosRow.props.disabled, true, 'ToS-suspended account must be disabled in QuotaPill switcher')
+  assert.equal(expRow.props.disabled, true, 'auth-expired account must be disabled in QuotaPill switcher')
+  assert.ok(findOne(expRow, (n) => n.props && n.props['data-agy-pill-auth-expired'] === 'true'))
+  assert.match(textOf(expRow), /凭据失效/)
+  // Clicking disabled rows must not call switchAccount
+  tosRow.props.onClick()
+  expRow.props.onClick()
+  await flush()
+  assert.equal(calls.filter(c => c.method === 'switchAccount').length, 0)
+  pillView.unmount()
+
+  // 2. Settings section hides Set default for ToS/expired accounts and supports Export backup in AccountEditorModal
+  const settingsSlot = registered.get('settings.section')
+  const settingsView = mount(settingsSlot.Component, settingsSlot.meta.inject())
+  await flush()
+
+  const tosCard = findOne(settingsView.tree, (n) => n.props && n.props['data-agy-account'] === 'acc-tos')
+  const expCard = findOne(settingsView.tree, (n) => n.props && n.props['data-agy-account'] === 'acc-expired')
+  assert.equal(findOne(tosCard, (n) => n.props && n.props['data-agy-switch-btn'] === 'acc-tos'), null, 'ToS card must not render Set default')
+  assert.equal(findOne(expCard, (n) => n.props && n.props['data-agy-switch-btn'] === 'acc-expired'), null, 'auth-expired card must not render Set default')
+
+  const primaryCard = findOne(settingsView.tree, (n) => n.props && n.props['data-agy-account'] === 'default')
+  const editBtn = findOne(primaryCard, (n) => n.tag === 'button' && textOf(n) === '编辑')
+  assert.ok(editBtn)
+  editBtn.props.onClick()
+  await flush()
+
+  const exportBtn = findOne(settingsView.tree, (n) => n.props && n.props['data-agy-export-backup-btn'] === 'default')
+  assert.ok(exportBtn, 'AccountEditorModal must render Export backup button')
+  exportBtn.props.onClick()
+  await flush()
+  assert.equal(calls.filter(c => c.method === 'exportCredential').length, 1)
+  assert.equal(calls[0].req.accountId, 'default')
+  const notice = findOne(settingsView.tree, (n) => n.props && n.props['data-agy-editor-notice'] === 'default')
+  assert.ok(notice)
+  assert.match(textOf(notice), /credential-backups/)
+  settingsView.unmount()
 })

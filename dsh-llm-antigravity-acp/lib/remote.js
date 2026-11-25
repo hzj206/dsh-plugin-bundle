@@ -347,6 +347,7 @@ const loginResultCodec = codec(`${PACKAGE_NAME}#LoginResult`, parseObject('antig
 const snapshotRequestCodec = codec(`${PACKAGE_NAME}#SnapshotAccountRequest`, parseSnapshotRequest);
 const importCredentialRequestCodec = codec(`${PACKAGE_NAME}#ImportCredentialRequest`, parseImportCredentialRequest);
 const credentialResultCodec = codec(`${PACKAGE_NAME}#CredentialActionResult`, parseObject('antigravity credential result'));
+const exportCredentialResultCodec = codec(`${PACKAGE_NAME}#CredentialExportResult`, parseObject('antigravity credential export result'));
 const recheckResultCodec = codec(`${PACKAGE_NAME}#RecheckResult`, parseObject('antigravity recheck result'));
 /** Invocation descriptors registered with the Host Gateway. */
 export const INVOCATIONS = [
@@ -448,6 +449,15 @@ export const INVOCATIONS = [
         invocation: { kind: 'direct' },
         parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: false, codec: importCredentialRequestCodec }],
         result: credentialResultCodec,
+    },
+    {
+        id: `${PACKAGE_NAME}#${SERVICE_NAME}/exportCredential`,
+        service: SERVICE_NAME,
+        namespace: SERVICE_NAME,
+        method: 'exportCredential',
+        invocation: { kind: 'direct' },
+        parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: false, codec: loginCodec }],
+        result: exportCredentialResultCodec,
     },
     {
         id: `${PACKAGE_NAME}#${SERVICE_NAME}/recheckAccount`,
@@ -626,6 +636,15 @@ export class AntigravityRemote extends TypertRemoteService {
         const result = await this.options.runtime.importAccountCredential(parsed);
         await this.persistAccountsIfCreated(result);
         return result;
+    }
+    /**
+     * Safely export one account's permanent OAuth credential to a local 0600 backup
+     * file under `<primaryHome>/credential-backups/`. Never returns secret tokens over RPC.
+     * @param request - target account id.
+     * @returns metadata including the saved local file path.
+     */
+    exportCredential(request) {
+        return this.options.runtime.exportAccountCredential(parseLoginRequest(request).accountId);
     }
     /**
      * Recheck verification / ToS suspension status and live quota for one account.

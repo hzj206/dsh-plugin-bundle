@@ -18,6 +18,10 @@
  * @module dsh-llm-antigravity-acp/cloudcode
  */
 
+import { randomBytes } from 'node:crypto'
+import { unlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { DEFAULT_TOS_APPEAL_URL } from './account-health.ts'
 import { envWithProxy, proxyUrlFromEnv, type AccountLayout } from './accounts.ts'
 import type { CatalogModel } from './catalog.ts'
@@ -208,6 +212,16 @@ export async function readAccountOAuthCredential(
  * @param parentEnv - optional host environment override for tests.
  * @returns transport function.
  */
+/** Escape a string value for a curl `-K` double-quoted config parameter. */
+function escapeCurlConfigValue(value: string): string {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n')
+    .replace(/\t/g, '\\t')
+}
+
 export function createCloudCodeTransport(
   run: CommandRunner,
   parentEnv: NodeJS.ProcessEnv = process.env,
@@ -220,20 +234,32 @@ export function createCloudCodeTransport(
       const effectiveEnv: NodeJS.ProcessEnv = accountProxy.length > 0
         ? (env ?? {})
         : envWithProxy((env ?? {}) as Record<string, string>, hostProxy)
-      const argv = ['curl', '-sS', '--max-time', '15', '-X', 'POST', url, '-w', '\n__HTTP_STATUS__:%{http_code}']
+      // Pass Authorization headers and OAuth refresh_token request bodies via an
+      // ephemeral 0600 `-K` config file rather than CLI argv so secrets are never
+      // visible in process listings (`ps` / `Get-CimInstance Win32_Process`).
+      const cfgPath = join(tmpdir(), `dsh-agy-curl-${process.pid}-${randomBytes(8).toString('hex')}.cfg`)
+      const cfgLines: string[] = []
       for (const [key, value] of Object.entries(headers)) {
-        argv.push('-H', `${key}: ${value}`)
+        const cleanKey = key.replace(/[\r\n]/g, '')
+        const cleanValue = value.replace(/[\r\n]/g, '')
+        cfgLines.push(`header = "${escapeCurlConfigValue(`${cleanKey}: ${cleanValue}`)}"`)
       }
-      argv.push('--data-raw', body)
-      const res = await run(argv, REQUEST_TIMEOUT_MS + 2_000, effectiveEnv)
-      if (res.code !== 0) throw new Error(res.stderr.trim() || `curl exit ${String(res.code)}`)
-      const statusMatch = /\r?\n__HTTP_STATUS__:(\d+)\s*$/.exec(res.stdout)
-      if (statusMatch === null) throw new Error('missing HTTP status from curl')
-      const rawBody = res.stdout.slice(0, statusMatch.index)
-      const status = Number(statusMatch[1])
-      let parsed: unknown = rawBody
-      try { parsed = JSON.parse(rawBody) } catch { /* non-JSON error text */ }
-      return { status, body: parsed }
+      cfgLines.push(`data-raw = "${escapeCurlConfigValue(body)}"`)
+      writeFileSync(cfgPath, `${cfgLines.join('\n')}\n`, { encoding: 'utf8', mode: 0o600 })
+      try {
+        const argv = ['curl', '-sS', '--max-time', '15', '-X', 'POST', url, '-K', cfgPath, '-w', '\n__HTTP_STATUS__:%{http_code}']
+        const res = await run(argv, REQUEST_TIMEOUT_MS + 2_000, effectiveEnv)
+        if (res.code !== 0) throw new Error(res.stderr.trim() || `curl exit ${String(res.code)}`)
+        const statusMatch = /\r?\n__HTTP_STATUS__:(\d+)\s*$/.exec(res.stdout)
+        if (statusMatch === null) throw new Error('missing HTTP status from curl')
+        const rawBody = res.stdout.slice(0, statusMatch.index)
+        const status = Number(statusMatch[1])
+        let parsed: unknown = rawBody
+        try { parsed = JSON.parse(rawBody) } catch { /* non-JSON error text */ }
+        return { status, body: parsed }
+      } finally {
+        try { unlinkSync(cfgPath) } catch { /* best-effort temp cleanup */ }
+      }
     }
     const response = await fetch(url, {
       method: 'POST',
@@ -440,14 +466,21 @@ export function checkArgonEligibility(
   tier: SubscriptionTier,
 ): boolean {
   const hasExplicitDisabled = rawModels.some(m => /argon/i.test(m.id) && m.disabled)
+  if (hasExplicitDisabled) return false
   if (tier === 'ULTRA' || tier === 'ENTERPRISE') {
-    return !hasExplicitDisabled
+    return true
   }
   if (summaryGroups.some(isGroupArgon)) {
-    return !hasExplicitDisabled
+    return true
   }
-  if (summaryGroups.length === 0) {
-    return rawModels.some(m => /argon/i.test(m.id) && !m.disabled)
+  // Current Google AI Pro accounts expose active, non-disabled Argon models in
+  // `fetchAvailableModels` and include Argon inside the shared Gemini quota
+  // group description instead of a separate `gemini-argon-wtu-weekly` group.
+  if (rawModels.some(m => /argon/i.test(m.id) && !m.disabled)) {
+    return true
+  }
+  if (summaryGroups.some(g => !isGroupThirdParty(g) && /\bargon\b/i.test(g.description))) {
+    return true
   }
   return false
 }
@@ -487,6 +520,8 @@ const DEFAULT_FAMILY_DISPLAY_NAMES: Record<string, string> = {
   'gemini-4-argon': 'Gemini 4 Argon',
   'gemini-4-hydrogen': 'Gemini 4 Hydrogen',
   'gemini-pro-orchestrator-neon': 'Orchestrator (Neon)',
+  'gemini-pro-orchestrator': 'Orchestrator (Carbon)',
+  'gemini-pro-orchestrator-argon': 'Orchestrator (Argon)',
   'gemini-pro-orchestrator-g1-pro': 'Orchestrator (Argon)',
   'gemini-3.8-flash': 'Gemini 3.8 Flash',
   'claude-opus-5-5': 'Claude Opus 5.5',
@@ -669,14 +704,19 @@ function summarizeClaudeGptLabel(models: readonly CatalogModel[]): string {
 }
 
 function summarizeGeminiLabel(models: readonly CatalogModel[], includeArgon: boolean): string {
-  const hasFlash38 = models.some(m => m.id.toLowerCase().startsWith('gemini-3.8'))
-  // Carbon ships on the same shared Ultra pool as Argon; a pool that serves it
-  // names it first, matching the upstream Recommended ordering.
+  const hasNeon = models.some(m => m.id.toLowerCase().startsWith('gemini-4-neon'))
   const hasCarbon = models.some(m => m.id.toLowerCase().startsWith('gemini-4-carbon'))
-  if (includeArgon && hasCarbon && hasFlash38) return 'Gemini 4 Carbon / Argon / 3.8'
-  if (includeArgon && hasCarbon) return 'Gemini 4 Carbon / Argon'
-  if (includeArgon && hasFlash38) return 'Gemini 4 Argon / 3.8'
-  if (includeArgon) return 'Gemini 4 Argon'
+  const hasHydrogen = models.some(m => m.id.toLowerCase().startsWith('gemini-4-hydrogen'))
+  const hasFlash38 = models.some(m => m.id.toLowerCase().startsWith('gemini-3.8'))
+  const gen4: string[] = []
+  if (hasNeon) gen4.push('Neon')
+  if (hasCarbon) gen4.push('Carbon')
+  if (includeArgon) gen4.push('Argon')
+  if (hasHydrogen) gen4.push('Hydrogen')
+  if (gen4.length > 0) {
+    const prefix = `Gemini 4 ${gen4.join(' / ')}`
+    return hasFlash38 ? `${prefix} / 3.8` : prefix
+  }
   if (hasFlash38) return 'Gemini 3.8 Flash'
   return 'Gemini'
 }
@@ -724,7 +764,11 @@ export function normalizeCloudCodeQuotaGroups(
 
   const dedicatedArgonGroups = summaryGroups.filter(isGroupArgon)
   const hasDedicatedArgon = dedicatedArgonGroups.length > 0
-  const argonSharedWithGemini = argonEligible && !hasDedicatedArgon && (tier === 'ULTRA' || tier === 'ENTERPRISE')
+  const argonSharedWithGemini = argonEligible && !hasDedicatedArgon && (
+    tier === 'ULTRA'
+    || tier === 'ENTERPRISE'
+    || summaryGroups.length > 0
+  )
 
   const out: QuotaGroup[] = []
 

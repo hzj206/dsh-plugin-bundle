@@ -15,7 +15,7 @@ import {
   parseStoredOAuthCredential,
   readAccountOAuthCredential,
 } from '../lib/cloudcode.js'
-import { groupForModel } from '../lib/quota.js'
+import { groupForModel, resolveModelQuota } from '../lib/quota.js'
 
 test('normalizeSubscriptionTier and parseLoadCodeAssist prioritize paidTier and never guess PRO from unknown strings', () => {
   assert.equal(normalizeSubscriptionTier('g1-ultra-tier'), 'ULTRA')
@@ -367,4 +367,98 @@ test('parseStoredOAuthCredential unwraps go-keyring-base64 with a nested token, 
   )
   assert.ok(stored)
   assert.equal(stored.accessToken, 'file-tok')
+})
+
+test('Modern Google AI Pro sharing Gemini Models pool exposes Gemini 4 Argon + Neon + Hydrogen without false disabledModels', () => {
+  const summaryGroups = [
+    {
+      displayName: 'Gemini Models',
+      description: 'Models within this group: Gemini 4 Neon, Gemini 4 Carbon, Gemini 4 Argon, Gemini 4 Hydrogen, Gemini 3.8 Flash',
+      buckets: [
+        { id: 'gemini-weekly', name: 'Weekly Limit Remaining', window: 'weekly', remainingFraction: 0.93, resetTime: '2026-12-02T01:59:13Z' },
+        { id: 'gemini-5h', name: 'Five Hour Limit Remaining', window: '5h', remainingFraction: 0.74, resetTime: '2026-11-25T06:59:13Z' },
+      ],
+    },
+    {
+      displayName: 'Claude and GPT models',
+      description: 'Models within this group: Claude Opus 5.5, Claude Sonnet 5.5, GPT-OSS 120B',
+      buckets: [
+        { id: '3p-weekly', name: 'Weekly Limit Remaining', window: 'weekly', remainingFraction: 1, resetTime: '' },
+        { id: '3p-5h', name: 'Five Hour Limit Remaining', window: '5h', remainingFraction: 1, resetTime: '' },
+      ],
+    },
+  ]
+  const fetchAvailable = {
+    agentModelSorts: [{
+      displayName: 'Recommended',
+      groups: [{
+        modelIds: [
+          'gemini-4-neon-high', 'gemini-4-neon-xhigh', 'gemini-4-neon-medium', 'gemini-4-neon-low',
+          'gemini-4-carbon-medium', 'gemini-4-carbon-high', 'gemini-4-carbon-low',
+          'gemini-4-argon-medium', 'gemini-4-argon-high', 'gemini-4-argon-low',
+          'gemini-4-hydrogen-high', 'gemini-4-hydrogen-xhigh', 'gemini-4-hydrogen-medium', 'gemini-4-hydrogen-low',
+          'gemini-3.8-flash-high', 'gemini-3.8-flash-medium', 'gemini-3.8-flash-low',
+          'claude-opus-5-5-low', 'claude-opus-5-5-medium', 'claude-opus-5-5-high',
+          'claude-sonnet-5-5-low', 'claude-sonnet-5-5-medium', 'claude-sonnet-5-5-high',
+          'gpt-oss-120b-medium',
+        ],
+      }],
+    }],
+    models: {
+      'gemini-4-neon-high': { displayName: 'Gemini 4 Neon (High)', maxTokens: 1048576 },
+      'gemini-4-neon-xhigh': { displayName: 'Gemini 4 Neon (XHigh)', maxTokens: 1048576 },
+      'gemini-4-neon-medium': { displayName: 'Gemini 4 Neon (Medium)', maxTokens: 1048576 },
+      'gemini-4-neon-low': { displayName: 'Gemini 4 Neon (Low)', maxTokens: 1048576 },
+      'gemini-4-carbon-high': { displayName: 'Gemini 4 Carbon (High)', maxTokens: 1048576 },
+      'gemini-4-carbon-medium': { displayName: 'Gemini 4 Carbon (Medium)', maxTokens: 1048576 },
+      'gemini-4-carbon-low': { displayName: 'Gemini 4 Carbon (Low)', maxTokens: 1048576 },
+      'gemini-4-argon-high': { displayName: 'Gemini 4 Argon (High)', maxTokens: 1048576 },
+      'gemini-4-argon-medium': { displayName: 'Gemini 4 Argon (Medium)', maxTokens: 1048576 },
+      'gemini-4-argon-low': { displayName: 'Gemini 4 Argon (Low)', maxTokens: 1048576 },
+      'gemini-4-hydrogen-high': { displayName: 'Gemini 4 Hydrogen (High)', maxTokens: 1048576 },
+      'gemini-4-hydrogen-xhigh': { displayName: 'Gemini 4 Hydrogen (XHigh)', maxTokens: 1048576 },
+      'gemini-4-hydrogen-medium': { displayName: 'Gemini 4 Hydrogen (Medium)', maxTokens: 1048576 },
+      'gemini-4-hydrogen-low': { displayName: 'Gemini 4 Hydrogen (Low)', maxTokens: 1048576 },
+      'gemini-3.8-flash-high': { displayName: 'Gemini 3.8 Flash (High)', maxTokens: 1048576 },
+      'gemini-3.8-flash-medium': { displayName: 'Gemini 3.8 Flash (Medium)', maxTokens: 1048576 },
+      'gemini-3.8-flash-low': { displayName: 'Gemini 3.8 Flash (Low)', maxTokens: 1048576 },
+      'claude-opus-5-5-low': { displayName: 'Claude Opus 5.5 (Low)', maxTokens: 1000000 },
+      'claude-opus-5-5-medium': { displayName: 'Claude Opus 5.5 (Medium)', maxTokens: 1000000 },
+      'claude-opus-5-5-high': { displayName: 'Claude Opus 5.5 (High)', maxTokens: 1000000 },
+      'claude-sonnet-5-5-low': { displayName: 'Claude Sonnet 5.5 (Low)', maxTokens: 1000000 },
+      'claude-sonnet-5-5-medium': { displayName: 'Claude Sonnet 5.5 (Medium)', maxTokens: 1000000 },
+      'claude-sonnet-5-5-high': { displayName: 'Claude Sonnet 5.5 (High)', maxTokens: 1000000 },
+      'gpt-oss-120b-medium': { displayName: 'GPT-OSS 120B (Medium)', maxTokens: 131072 },
+    },
+  }
+
+  const derived = deriveAccountModels(fetchAvailable, summaryGroups, 'PRO')
+  assert.equal(derived.argonEligible, true)
+  assert.deepEqual(derived.disabledModels, [])
+  assert.deepEqual(derived.models.map(m => m.id), [
+    'gemini-4-neon',
+    'gemini-4-carbon',
+    'gemini-4-argon',
+    'gemini-4-hydrogen',
+    'gemini-3.8-flash',
+    'claude-opus-5-5',
+    'claude-sonnet-5-5',
+    'gpt-oss-120b-medium',
+  ])
+
+  const normalized = normalizeCloudCodeQuotaGroups(summaryGroups, derived.models, derived.rawModels, 'PRO', derived.argonEligible)
+  assert.equal(normalized.argonSharedWithGemini, true)
+  assert.equal(normalized.groups[0].name, 'Gemini 4 Neon / Carbon / Argon / Hydrogen / 3.8')
+  const focus = resolveModelQuota({
+    status: 'ok',
+    updatedAt: '2026-11-25T00:00:00Z',
+    subscriptionTier: 'PRO',
+    argonSharedWithGemini: normalized.argonSharedWithGemini,
+    availableModels: derived.models,
+    disabledModels: derived.disabledModels,
+    groups: normalized.groups,
+  }, 'gemini-4-argon')
+  assert.equal(focus.entitled, true)
+  assert.equal(focus.group.kind, 'gemini')
+  assert.equal(focus.group.buckets[0].remainingFraction, 0.93)
 })

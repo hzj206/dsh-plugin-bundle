@@ -346,22 +346,53 @@ test('D5: cliEnv inherits host proxy/TLS vars, isolates account overrides, keeps
   assert.equal(overridden.SSL_CERT_FILE, 'C:\\certs\\corp.pem')
 })
 
-test('D5: createCloudCodeTransport routes via curl when host parentEnv declares a proxy and parses CRLF status', async () => {
+test('D5: createCloudCodeTransport routes via curl -K config without exposing secrets in argv and always deletes temp config', async () => {
   const seen = []
+  let capturedCfgPath = ''
+  let capturedCfgText = ''
+  const secretAccess = 'ya29.super-secret-bearer-token'
+  const secretRefresh = '1//super-secret-refresh-token'
   const transport = createCloudCodeTransport(
     async (argv, _timeout, env) => {
+      const kIdx = argv.indexOf('-K')
+      assert.ok(kIdx > 0 && typeof argv[kIdx + 1] === 'string', 'curl must receive -K <cfgPath>')
+      capturedCfgPath = argv[kIdx + 1]
+      capturedCfgText = readFileSync(capturedCfgPath, 'utf8')
       seen.push({ argv, env })
       return { code: 0, stdout: '{"ok":true}\r\n__HTTP_STATUS__:200\r\n', stderr: '' }
     },
     { HTTPS_PROXY: 'http://127.0.0.1:7890' },
   )
-  const res = await transport('https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist', { 'user-agent': 'test' }, '{}', {})
+  const res = await transport(
+    'https://oauth2.googleapis.com/token',
+    { authorization: `Bearer ${secretAccess}`, 'user-agent': 'test' },
+    `refresh_token=${secretRefresh}&grant_type=refresh_token`,
+    {},
+  )
   assert.equal(res.status, 200)
   assert.deepEqual(res.body, { ok: true })
   assert.equal(seen.length, 1)
   assert.equal(seen[0].argv[0], 'curl')
+  assert.equal(seen[0].argv.join(' ').includes(secretAccess), false, 'Bearer token must NEVER appear in process argv')
+  assert.equal(seen[0].argv.join(' ').includes(secretRefresh), false, 'refresh_token must NEVER appear in process argv')
+  assert.match(capturedCfgText, /header = "authorization: Bearer ya29\.super-secret-bearer-token"/)
+  assert.match(capturedCfgText, /data-raw = "refresh_token=1\/\/super-secret-refresh-token&grant_type=refresh_token"/)
+  assert.equal(existsSync(capturedCfgPath), false, 'ephemeral curl -K config file must be deleted after success')
   assert.equal(seen[0].env.HTTPS_PROXY, 'http://127.0.0.1:7890')
   assert.equal(seen[0].env.NO_PROXY, '127.0.0.1,localhost,::1')
+
+  // Failure path also removes the ephemeral config file
+  let failedCfgPath = ''
+  const failingTransport = createCloudCodeTransport(
+    async (argv) => {
+      failedCfgPath = argv[argv.indexOf('-K') + 1]
+      return { code: 28, stdout: '', stderr: 'timed out' }
+    },
+    { HTTPS_PROXY: 'http://127.0.0.1:7890' },
+  )
+  await assert.rejects(() => failingTransport('https://oauth2.googleapis.com/token', { authorization: `Bearer ${secretAccess}` }, '{}', {}), /timed out/)
+  assert.ok(failedCfgPath.length > 0)
+  assert.equal(existsSync(failedCfgPath), false, 'ephemeral curl -K config file must be deleted even on curl error')
 })
 
 // ============================================================================

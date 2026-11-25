@@ -201,8 +201,14 @@ export interface AccountStatus {
   subscriptionName?: string
   /** Models this account's own upstream endpoint actually entitles. */
   availableModels?: readonly { id: string; name: string; enabled: boolean }[]
+  /** Observed upstream-open models specific to this account (live or cached from health store), without falling back to the provider union. */
+  entitledModels?: readonly { id: string; name: string }[]
   /** Models explicitly marked disabled by upstream for this account (e.g. `gemini-4-argon`). */
   disabledModels?: readonly string[]
+  /** True when Argon shares the main Gemini quota pool on this account. */
+  argonSharedWithGemini?: boolean
+  /** Latest OAuth authentication error (e.g. HTTP 401 token expired/revoked). */
+  authError?: string
   /** Context-window override in tokens. `0` follows the provider default. */
   contextWindow: number
   /** Families this account narrows out of the provider's visible list; empty inherits it. */

@@ -20,6 +20,8 @@ export interface AccountSlot {
   env: NodeJS.ProcessEnv
   preflight: PreflightResult | undefined
   preflightPromise: Promise<PreflightResult> | undefined
+  /** File size + mtime signature of the binary at last preflight so `agy update` triggers re-check. */
+  preflightBinarySig: string | undefined
   process: AcpProcess | undefined
   starting: Promise<AcpProcess> | undefined
   /** Engine mode the running ACP front was started with, or undefined while idle. */
@@ -44,12 +46,18 @@ export interface AccountSlot {
   subscriptionName: string | undefined
   /** Models actually entitled on this account's endpoint (`fetchAvailableModels` or ACP `session/new`). */
   availableModels: CatalogModel[] | undefined
+  /** Model list reported directly by this account's `agy acp` `session/new` (includes CLI-side orchestrators). */
+  acpModels: CatalogModel[] | undefined
   /** Per-model offered efforts discovered for this account. */
   effortsByModel: Record<string, Effort[]> | undefined
   /** Per-model context window ceiling discovered for this account. */
   maxTokensByModel: Record<string, number> | undefined
   /** Models explicitly marked disabled by upstream on this account. */
   disabledModels: string[] | undefined
+  /** True when Argon shares the main Gemini quota pool on this account (Ultra, Enterprise, or shared-pool Pro). */
+  argonSharedWithGemini: boolean | undefined
+  /** Latest OAuth authentication error observed on this account (e.g. HTTP 401 token revoked), cleared on next OK read. */
+  authError: string | undefined
   /** Tokens reported for this account since the provider process started. */
   usage: { inputTokens: number; outputTokens: number; totalTokens: number }
 }
@@ -66,6 +74,7 @@ export function newSlot(layout: AccountLayout, platform: NodeJS.Platform = proce
     env: accountEnv(layout, platform),
     preflight: undefined,
     preflightPromise: undefined,
+    preflightBinarySig: undefined,
     process: undefined,
     starting: undefined,
     engineMode: undefined,
@@ -80,9 +89,12 @@ export function newSlot(layout: AccountLayout, platform: NodeJS.Platform = proce
     subscriptionTier: undefined,
     subscriptionName: undefined,
     availableModels: undefined,
+    acpModels: undefined,
     effortsByModel: undefined,
     maxTokensByModel: undefined,
     disabledModels: undefined,
+    argonSharedWithGemini: undefined,
+    authError: undefined,
     usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
   }
 }

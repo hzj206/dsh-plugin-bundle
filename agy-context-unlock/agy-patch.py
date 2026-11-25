@@ -69,6 +69,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 
 PCLNTAB_MAGIC = 0xFFFFFFF1
 ENV_NAME = b"AGY_CLI_AUTO_COMPACT_OVERRIDE"
@@ -1187,6 +1188,22 @@ def _running_pids_for_binary(src):
     return [p for p in running.stdout.split() if p != str(os.getpid())]
 
 
+def _cleanup_stale_prepatch_files(dst):
+    """Best-effort removal of unlocked *.pre-patch.*.old binaries left by prior Windows live-patches."""
+    parent = os.path.dirname(dst) or "."
+    prefix = os.path.basename(dst) + ".pre-patch."
+    try:
+        entries = os.listdir(parent)
+    except OSError:
+        return
+    for name in entries:
+        if name.startswith(prefix) and name.endswith(".old"):
+            try:
+                os.unlink(os.path.join(parent, name))
+            except OSError:
+                pass
+
+
 def write_atomic_signed(dst, data, src_for_entitlements=None, make_backup=False):
     """Write to a fresh inode, sign, then os.replace() to refresh macOS cs_blob cache."""
     _strip_pe_authenticode(data)
@@ -1207,14 +1224,38 @@ def write_atomic_signed(dst, data, src_for_entitlements=None, make_backup=False)
         try:
             os.replace(tmp, dst)
         except PermissionError as exc:
-            raise PatchError(
-                f"cannot overwrite {dst} ({exc.strerror or 'access denied'}); "
-                f"quit any running {os.path.basename(dst)} processes and retry"
-            ) from exc
+            if sys.platform == "win32" and os.path.exists(dst):
+                # Windows forbids overwriting an executing image in place, but
+                # allows renaming it aside (just like `agy update` itself does).
+                # Running processes keep their mapped file; new spawns load the
+                # unlocked binary immediately.
+                stale = f"{dst}.pre-patch.{os.getpid()}.{int(time.time())}.old"
+                try:
+                    os.rename(dst, stale)
+                    try:
+                        os.replace(tmp, dst)
+                    except Exception:
+                        try:
+                            os.rename(stale, dst)
+                        except OSError:
+                            pass
+                        raise
+                    print(f"[i] moved running binary aside: {stale}")
+                except OSError as win_exc:
+                    raise PatchError(
+                        f"cannot overwrite {dst} ({win_exc.strerror or exc.strerror or 'access denied'}); "
+                        f"quit any running {os.path.basename(dst)} processes and retry"
+                    ) from win_exc
+            else:
+                raise PatchError(
+                    f"cannot overwrite {dst} ({exc.strerror or 'access denied'}); "
+                    f"quit any running {os.path.basename(dst)} processes and retry"
+                ) from exc
     except Exception:
         if os.path.exists(tmp):
             os.unlink(tmp)
         raise
+    _cleanup_stale_prepatch_files(dst)
 
     if ident:
         print(f"[i] signature: identifier preserved as {ident!r}")

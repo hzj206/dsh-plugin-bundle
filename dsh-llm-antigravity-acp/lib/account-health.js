@@ -6,7 +6,8 @@
  * hot-switched accounts survive DSH restarts without ambiguity.
  * @module dsh-llm-antigravity-acp/account-health
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 /** Official Google Antigravity ToS suspension appeal form URL. */
 export const DEFAULT_TOS_APPEAL_URL = 'https://forms.gle/hGzM9MEUv2azZsrb9';
@@ -30,13 +31,20 @@ function asRecord(value) {
         : undefined;
 }
 function atomicWriteJson(filePath, data) {
+    let tmp;
     try {
         mkdirSync(dirname(filePath), { recursive: true });
-        const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-        writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
+        tmp = `${filePath}.${process.pid}.${Date.now()}.${randomBytes(4).toString('hex')}.tmp`;
+        writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
         renameSync(tmp, filePath);
     }
     catch {
+        if (tmp !== undefined) {
+            try {
+                unlinkSync(tmp);
+            }
+            catch { /* best-effort temp cleanup */ }
+        }
         // Health store is best-effort telemetry; never crash the runtime on I/O errors.
     }
 }
@@ -60,6 +68,8 @@ export class AccountHealthStore {
             return undefined;
         return {
             ...rec,
+            ...(rec.lastAvailableModels !== undefined ? { lastAvailableModels: rec.lastAvailableModels.map(m => ({ ...m })) } : {}),
+            ...(rec.lastDisabledModels !== undefined ? { lastDisabledModels: [...rec.lastDisabledModels] } : {}),
             ...(rec.downgradeAlert !== undefined ? { downgradeAlert: { ...rec.downgradeAlert } } : {}),
             tierHistory: rec.tierHistory.map(e => ({ ...e })),
         };
@@ -129,6 +139,37 @@ export class AccountHealthStore {
                 changed = true;
             }
         }
+        if (obs.availableModels !== undefined && obs.availableModels.length > 0) {
+            const normalized = obs.availableModels
+                .filter(m => typeof m.id === 'string' && m.id.trim().length > 0)
+                .map(m => ({ id: m.id.trim(), name: (m.name || m.id).trim() }));
+            if (normalized.length > 0 && JSON.stringify(rec.lastAvailableModels) !== JSON.stringify(normalized)) {
+                rec.lastAvailableModels = normalized;
+                changed = true;
+            }
+        }
+        if (obs.disabledModels !== undefined) {
+            const normalizedDisabled = [...new Set(obs.disabledModels.filter(id => typeof id === 'string' && id.trim().length > 0).map(id => id.trim()))];
+            if (normalizedDisabled.length > 0) {
+                if (JSON.stringify(rec.lastDisabledModels) !== JSON.stringify(normalizedDisabled)) {
+                    rec.lastDisabledModels = normalizedDisabled;
+                    changed = true;
+                }
+            }
+            else if (rec.lastDisabledModels !== undefined) {
+                delete rec.lastDisabledModels;
+                changed = true;
+            }
+        }
+        if (obs.argonSharedWithGemini !== undefined && rec.lastArgonSharedWithGemini !== obs.argonSharedWithGemini) {
+            rec.lastArgonSharedWithGemini = obs.argonSharedWithGemini;
+            changed = true;
+        }
+        if (rec.authError !== undefined || rec.authErrorAt !== undefined) {
+            delete rec.authError;
+            delete rec.authErrorAt;
+            changed = true;
+        }
         if (changed) {
             rec.updatedAt = now;
             this.records.set(accountId, rec);
@@ -168,6 +209,44 @@ export class AccountHealthStore {
         delete rec.tosSuspendedAt;
         delete rec.tosAppealUrl;
         delete rec.tosError;
+        rec.updatedAt = new Date().toISOString();
+        this.flush();
+    }
+    /**
+     * Record a persisted OAuth credential error (e.g. HTTP 401 token expired or revoked)
+     * so disabled/unprobed accounts keep surfacing their real auth status across restarts.
+     * @param accountId - account key.
+     * @param detail - account email and error message.
+     */
+    recordAuthError(accountId, detail) {
+        const now = detail.at ?? new Date().toISOString();
+        const existing = this.records.get(accountId);
+        const rec = existing !== undefined
+            ? { ...existing, tierHistory: [...existing.tierHistory] }
+            : { tierHistory: [] };
+        if (detail.email !== undefined && detail.email.trim().length > 0)
+            rec.email = detail.email.trim();
+        const trimmed = detail.error.trim();
+        const changed = rec.authError !== trimmed || existing === undefined;
+        rec.authError = trimmed;
+        rec.authErrorAt = rec.authErrorAt ?? now;
+        if (changed) {
+            rec.updatedAt = now;
+            this.records.set(accountId, rec);
+            this.flush();
+        }
+        return this.get(accountId) ?? rec;
+    }
+    /**
+     * Clear a persisted OAuth credential error once the account signs in again or probes OK.
+     * @param accountId - account key.
+     */
+    clearAuthError(accountId) {
+        const rec = this.records.get(accountId);
+        if (rec === undefined || (rec.authError === undefined && rec.authErrorAt === undefined))
+            return;
+        delete rec.authError;
+        delete rec.authErrorAt;
         rec.updatedAt = new Date().toISOString();
         this.flush();
     }
@@ -227,17 +306,31 @@ export class AccountHealthStore {
                         ...(alertObj.acknowledged === true ? { acknowledged: true } : {}),
                     }
                     : undefined;
+                const lastAvailableModels = Array.isArray(obj.lastAvailableModels)
+                    ? obj.lastAvailableModels
+                        .map(asRecord)
+                        .filter((m) => m !== undefined && typeof m.id === 'string' && m.id.trim().length > 0)
+                        .map(m => ({ id: m.id.trim(), name: typeof m.name === 'string' && m.name.trim().length > 0 ? m.name.trim() : m.id.trim() }))
+                    : undefined;
+                const lastDisabledModels = Array.isArray(obj.lastDisabledModels)
+                    ? obj.lastDisabledModels.filter((id) => typeof id === 'string' && id.trim().length > 0).map(id => id.trim())
+                    : undefined;
                 this.records.set(id, {
                     ...(typeof obj.email === 'string' ? { email: obj.email } : {}),
                     ...(typeof obj.lastTier === 'string' ? { lastTier: obj.lastTier } : {}),
                     ...(typeof obj.lastSubscriptionName === 'string' ? { lastSubscriptionName: obj.lastSubscriptionName } : {}),
                     ...(typeof obj.lastModelCount === 'number' ? { lastModelCount: obj.lastModelCount } : {}),
+                    ...(lastAvailableModels !== undefined && lastAvailableModels.length > 0 ? { lastAvailableModels } : {}),
+                    ...(lastDisabledModels !== undefined && lastDisabledModels.length > 0 ? { lastDisabledModels } : {}),
+                    ...(typeof obj.lastArgonSharedWithGemini === 'boolean' ? { lastArgonSharedWithGemini: obj.lastArgonSharedWithGemini } : {}),
                     ...(downgradeAlert !== undefined ? { downgradeAlert } : {}),
                     tierHistory,
                     ...(obj.tosSuspended === true ? { tosSuspended: true } : {}),
                     ...(typeof obj.tosSuspendedAt === 'string' ? { tosSuspendedAt: obj.tosSuspendedAt } : {}),
                     ...(typeof obj.tosAppealUrl === 'string' ? { tosAppealUrl: obj.tosAppealUrl } : {}),
                     ...(typeof obj.tosError === 'string' ? { tosError: obj.tosError } : {}),
+                    ...(typeof obj.authError === 'string' && obj.authError.trim().length > 0 ? { authError: obj.authError.trim() } : {}),
+                    ...(typeof obj.authErrorAt === 'string' ? { authErrorAt: obj.authErrorAt } : {}),
                     ...(typeof obj.updatedAt === 'string' ? { updatedAt: obj.updatedAt } : {}),
                 });
             }

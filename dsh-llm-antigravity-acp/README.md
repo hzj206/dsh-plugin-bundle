@@ -2,12 +2,12 @@
 
 > **Fork 增强维护版**（基于 [lili-luo/dsh-plugin-bundle](https://github.com/lili-luo/dsh-plugin-bundle) 持续维护，遵循原仓库 MIT 协议）
 > - **DSH 安装源**：`github:hzj206/dsh-plugin-bundle#main&path:/dsh-llm-antigravity-acp`
-> - **相比上游 `0.4.0`（`0eee9ba`）已合入的增强**：
->   - 全链路支持 `xhigh`（XHigh）思考强度（`config` / `catalog` / `cloudcode` / `runtime.observeSlotCatalog` / 设置页下拉框），修复会期重载后 `xhigh` 被三档白名单抹掉导致 `UNSUPPORTED_REASONING_EFFORT` 的问题
->   - 补全 `Gemini 4 Neon`、`Gemini 4 Hydrogen`、`Orchestrator (Neon / Argon)` 展示名称
->   - 为 `gpt-oss` 家族增加全局上下文窗口上限保护（最高 128K，避免被全局 512K/900K 配置越界覆盖）
->   - 增强 Web GUI 系统提示词段落的整段中文化反指纹替换（同时保留上游单句改写兼容）
->   - 兼容最新 DSH `@deepseek-ai/dsh-llm` 严格类型检查与 Windows 跨平台单元测试
+> - **相比上游 `0.4.0`（`0eee9ba`）已合入的核心增强（截至 `0.5.2`）**：
+>   - **Windows 真多账号并发隔离**：非默认账号通过独立 `USERPROFILE` + `WSL_INTEROP` + 独立凭据文件沙箱并发运行，互不覆写 Windows 凭据管理器，支持输入框右侧「额度」浮窗按会话一键切换 / 恢复自动调度
+>   - **安全凭据备份、导入与本地导出**：支持一键备份本机登录、导入 `agy_cred.ps1` / OAuth JSON 凭据、以及在账号编辑弹窗内一键导出 `0600` 本地备份文件（全程仅保存至本地磁盘，绝不经 RPC 或进程 `argv` 暴露 token）
+>   - **1M 上下文解锁与真实用量 80% 压缩校准**：`agy-patch.py` 适配 `agy 1.5.16+`（含 Windows 运行中二进制热替换与 Gate 3A/3B），`realUsageCompaction` 以账单真实输入 + 缓存读取校准 DSH 80% 压缩触发点，避免启发式估算偏大导致过早压缩
+>   - **账号健康监控与反风控降噪**：自动识别并持久化 `ULTRA / PRO / FREE` 订阅等级、降级提醒、Google 验证（403）、ToS 封禁申诉与 `invalid_grant` 凭据失效状态；自动跳过停用 / 封禁 / 失效账号，代理环境下 `curl` 凭据走临时 `0600` `-K` 配置文件
+>   - **完整上游模型与 `xhigh` 全链路支持**：支持 `Gemini 4 Neon / Hydrogen / Carbon / Argon`、`Orchestrator (Neon / Argon)`、`Claude 5.5`、`GPT-OSS`（128K 上限保护）与 `xhigh` 思考强度，按账号独立呈现上游全部可用模型与共享池 Argon 额度
 
 把本机已登录的 Google Antigravity CLI（`agy`）作为 DeepSeek Harness 的一级模型 provider 接入。模型出现在输入框右下角的模型选择器里，与 DeepSeek、GLM 等直连 provider 同级使用；工具、权限、压缩、子代理全部由 DSH 负责。
 

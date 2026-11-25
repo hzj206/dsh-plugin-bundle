@@ -299,6 +299,12 @@ function createModelSelection(deps) {
       if (!collapsedOnModelsPage) void run('load')
     }, [collapsedOnModelsPage])
 
+    React.useEffect(() => {
+      if (props.externalStatus !== undefined && props.externalStatus !== null && typeof props.externalStatus === 'object') {
+        setStatus(props.externalStatus)
+      }
+    }, [props.externalStatus])
+
     const candidates = candidatesOf(adapter, status)
     const candidateIds = candidates.map((c) => c.id)
     const globallyHidden = adapter && typeof adapter.globallyHidden === 'function' ? adapter.globallyHidden(status) : []

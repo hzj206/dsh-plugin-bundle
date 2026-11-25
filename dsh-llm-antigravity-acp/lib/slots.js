@@ -18,6 +18,7 @@ export function newSlot(layout, platform = process.platform) {
         env: accountEnv(layout, platform),
         preflight: undefined,
         preflightPromise: undefined,
+        preflightBinarySig: undefined,
         process: undefined,
         starting: undefined,
         engineMode: undefined,
@@ -32,9 +33,12 @@ export function newSlot(layout, platform = process.platform) {
         subscriptionTier: undefined,
         subscriptionName: undefined,
         availableModels: undefined,
+        acpModels: undefined,
         effortsByModel: undefined,
         maxTokensByModel: undefined,
         disabledModels: undefined,
+        argonSharedWithGemini: undefined,
+        authError: undefined,
         usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
     };
 }

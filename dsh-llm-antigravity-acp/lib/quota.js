@@ -111,8 +111,9 @@ function argonUnavailable(snapshot, model) {
     if ((snapshot.disabledModels ?? []).some(entry => entry === model || /argon/i.test(entry)))
         return true;
     const entitled = snapshot.availableModels;
-    if (Array.isArray(entitled) && entitled.length > 0 && !entitled.some(entry => entry.id === model || /argon/i.test(entry.id)))
-        return true;
+    if (Array.isArray(entitled) && entitled.length > 0) {
+        return !entitled.some(entry => entry.id === model || /argon/i.test(entry.id));
+    }
     const tier = snapshot.subscriptionTier;
     return tier === 'PRO' || tier === 'FREE';
 }

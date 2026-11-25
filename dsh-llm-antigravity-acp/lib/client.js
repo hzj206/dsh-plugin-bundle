@@ -300,6 +300,12 @@ function createModelSelection(deps) {
       if (!collapsedOnModelsPage) void run('load')
     }, [collapsedOnModelsPage])
 
+    React.useEffect(() => {
+      if (props.externalStatus !== undefined && props.externalStatus !== null && typeof props.externalStatus === 'object') {
+        setStatus(props.externalStatus)
+      }
+    }, [props.externalStatus])
+
     const candidates = candidatesOf(adapter, status)
     const candidateIds = candidates.map((c) => c.id)
     const globallyHidden = adapter && typeof adapter.globallyHidden === 'function' ? adapter.globallyHidden(status) : []
@@ -719,6 +725,7 @@ window.__ModuleLoader__.load({
       { id: `${PACKAGE}#${SERVICE}/switchAccount`, service: SERVICE, namespace: SERVICE, method: 'switchAccount', invocation: { kind: 'direct' }, parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: false, codec: codec('SwitchAccountRequest', anyObject) }], result: codec('Status', anyObject) },
       { id: `${PACKAGE}#${SERVICE}/snapshotAccount`, service: SERVICE, namespace: SERVICE, method: 'snapshotAccount', invocation: { kind: 'direct' }, parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: true, codec: codec('SnapshotAccountRequest', optionalObject) }], result: codec('CredentialActionResult', anyObject) },
       { id: `${PACKAGE}#${SERVICE}/importCredential`, service: SERVICE, namespace: SERVICE, method: 'importCredential', invocation: { kind: 'direct' }, parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: false, codec: codec('ImportCredentialRequest', anyObject) }], result: codec('CredentialActionResult', anyObject) },
+      { id: `${PACKAGE}#${SERVICE}/exportCredential`, service: SERVICE, namespace: SERVICE, method: 'exportCredential', invocation: { kind: 'direct' }, parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: false, codec: codec('LoginRequest', anyObject) }], result: codec('CredentialExportResult', anyObject) },
       { id: `${PACKAGE}#${SERVICE}/recheckAccount`, service: SERVICE, namespace: SERVICE, method: 'recheckAccount', invocation: { kind: 'direct' }, parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: false, codec: codec('LoginRequest', anyObject) }], result: codec('RecheckResult', anyObject) },
       { id: `${PACKAGE}#${SERVICE}/ackDowngrade`, service: SERVICE, namespace: SERVICE, method: 'ackDowngrade', invocation: { kind: 'direct' }, parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: false, codec: codec('LoginRequest', anyObject) }], result: codec('Status', anyObject) },
     ]
@@ -771,6 +778,7 @@ window.__ModuleLoader__.load({
         switchAccount: (request) => call('switchAccount', request),
         snapshotAccount: (request) => call('snapshotAccount', request && typeof request === 'object' ? request : undefined),
         importCredential: (request) => call('importCredential', request),
+        exportCredential: (request) => call('exportCredential', request),
         recheckAccount: (request) => call('recheckAccount', request),
         ackDowngrade: (request) => call('ackDowngrade', request),
       }
@@ -830,10 +838,13 @@ window.__ModuleLoader__.load({
       const entitledModels = Array.isArray(quota.availableModels) ? quota.availableModels : null
       const disabledModels = Array.isArray(quota.disabledModels) ? quota.disabledModels : []
       const tier = quota.subscriptionTier || null
-      const argonDenied = () => disabledModels.some((entry) => entry === model || /argon/i.test(String(entry)))
-        || (entitledModels !== null && entitledModels.length > 0
-          && !entitledModels.some((entry) => entry && (entry.id === model || /argon/i.test(String(entry.id || '')))))
-        || tier === 'PRO' || tier === 'FREE'
+      const argonDenied = () => {
+        if (disabledModels.some((entry) => entry === model || /argon/i.test(String(entry)))) return true
+        if (entitledModels !== null && entitledModels.length > 0) {
+          return !entitledModels.some((entry) => entry && (entry.id === model || /argon/i.test(String(entry.id || ''))))
+        }
+        return tier === 'PRO' || tier === 'FREE'
+      }
       if (family === 'argon') {
         const argon = pick('argon')
         if (argon) return { family, entitled: true, group: argon }
@@ -1043,6 +1054,11 @@ window.__ModuleLoader__.load({
       '.dsh-agy-count{font-size:11px;padding:2px 9px;border-radius:999px;background:var(--dsw-alias-bg-module-platform, color-mix(in srgb, currentColor 6%, transparent));color:var(--dsw-alias-label-tertiary, currentColor);font-variant-numeric:tabular-nums}',
       '.dsh-agy-account-list{display:flex;flex-direction:column;gap:10px}',
       '.dsh-agy-account-card{display:flex;flex-direction:column;gap:10px;padding:12px 16px;border:0.5px solid var(--dsw-alias-settings-card-stroke, color-mix(in srgb, currentColor 14%, transparent));border-radius:var(--dsw-radius-xl, 20px);background:var(--dsw-alias-settings-card-fill, var(--dsw-alias-bg-layer-2, transparent))}',
+      '.dsh-agy-account-models{display:flex;flex-direction:column;gap:6px;padding-top:8px;border-top:0.5px solid var(--dsw-alias-border-l2, color-mix(in srgb, currentColor 9%, transparent))}',
+      '.dsh-agy-account-models-head{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11px;color:var(--dsw-alias-label-tertiary, currentColor)}',
+      '.dsh-agy-account-models-chips{display:flex;flex-wrap:wrap;gap:5px}',
+      '.dsh-agy-model-chip{display:inline-flex;align-items:center;padding:1px 8px;border-radius:999px;font-size:11px;line-height:18px;white-space:nowrap;background:var(--dsw-alias-bg-module-platform, color-mix(in srgb, currentColor 5%, transparent));border:0.5px solid var(--dsw-alias-border-l2, color-mix(in srgb, currentColor 10%, transparent));color:var(--dsw-alias-label-secondary, var(--dsw-alias-label-primary))}',
+      '.dsh-agy-model-chip-disabled{opacity:0.55;text-decoration:line-through}',
       '.dsh-agy-account-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:nowrap}',
       '.dsh-agy-account-identity{display:flex;align-items:center;gap:10px;min-width:0;flex:1 1 auto}',
       '.dsh-agy-avatar{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;flex:0 0 36px;border-radius:var(--dsw-radius-md, 10px);background:var(--dsw-alias-bg-module-platform, color-mix(in srgb, currentColor 6%, transparent));color:var(--dsw-alias-state-business-primary, var(--dsw-alias-label-primary, currentColor))}',
@@ -1543,6 +1559,7 @@ window.__ModuleLoader__.load({
       if (group && group.kind === 'argon') return t('Gemini 4 Argon (weekly)', 'Gemini 4 Argon（独立周限）')
       if (raw === 'Gemini 4 Carbon / Argon' || raw === 'Gemini 4 Carbon / Argon / 3.8') return t('Gemini / Carbon / Argon quota', 'Gemini / Carbon / Argon 额度')
       if (raw === 'Gemini 4 Argon / 3.8') return t('Gemini / Argon quota', 'Gemini / Argon 额度')
+      if (/^Gemini 4\b/i.test(raw)) return /3\.8/.test(raw) ? t('Gemini 4 / 3.8 quota', 'Gemini 4 / 3.8 额度') : t('Gemini 4 quota', 'Gemini 4 额度')
       if (raw === 'Gemini 3.8 Flash') return t('Gemini 3.8 quota', 'Gemini 3.8 额度')
       return t(`${raw} quota`, `${raw} 额度`)
     }
@@ -1590,7 +1607,9 @@ window.__ModuleLoader__.load({
         : t('Account quota', '账号额度')
       const entitled = (quota && Array.isArray(quota.availableModels) && quota.availableModels.length > 0)
         ? quota.availableModels
-        : (Array.isArray(row.availableModels) && (row.subscriptionTier || (quota && quota.subscriptionTier)) ? row.availableModels : [])
+        : (Array.isArray(row.entitledModels)
+          ? row.entitledModels
+          : (Array.isArray(row.availableModels) && (row.subscriptionTier || (quota && quota.subscriptionTier)) ? row.availableModels : []))
       const disabledList = (quota && Array.isArray(quota.disabledModels) ? quota.disabledModels : (Array.isArray(row.disabledModels) ? row.disabledModels : []))
       return h('div', { className: 'dsh-agy-quota-drawer', 'data-agy-quota': row.id },
         h('div', { className: 'dsh-agy-quota-head' },
@@ -1605,7 +1624,7 @@ window.__ModuleLoader__.load({
           : quota && quota.status === 'error' && groups.length === 0
             ? h('div', { className: 'dsh-agy-quota-error' }, quota.error || t('Quota is unavailable', '额度不可用'))
             : h('div', { className: 'dsh-agy-list' },
-              ...groups.map((group, idx) => h('div', { key: `${group.kind || 'g'}-${idx}` }, quotaRow(group, quotaGroupLabel(group)))),
+              ...groups.map((group, idx) => h('div', { key: `${group.kind || 'g'}-${idx}`, title: group.description || group.name || '' }, quotaRow(group, quotaGroupLabel(group)))),
               entitled.length > 0
                 ? h('div', { className: 'dsh-agy-quota-note' },
                   t(
@@ -1629,6 +1648,22 @@ window.__ModuleLoader__.load({
       const hasVerify = row.verificationRequired === true
       const isTosSuspended = row.tosSuspended === true
       const downgradeAlert = row.downgradeAlert && row.downgradeAlert.acknowledged !== true ? row.downgradeAlert : null
+      const authError = (typeof row.authError === 'string' && row.authError.trim().length > 0)
+        ? row.authError.trim()
+        : (props.quota && props.quota.status === 'error' && typeof props.quota.error === 'string'
+          && /401|expired|revoked|unauthorized|invalid_grant/i.test(props.quota.error)
+          ? props.quota.error
+          : null)
+      const cardEntitled = (props.quota && Array.isArray(props.quota.availableModels) && props.quota.availableModels.length > 0)
+        ? props.quota.availableModels
+        : (Array.isArray(row.entitledModels)
+          ? row.entitledModels
+          : (Array.isArray(row.availableModels) && row.availableModels.length > 0 && (row.subscriptionTier || (props.quota && props.quota.subscriptionTier))
+            ? row.availableModels
+            : []))
+      const cardDisabled = (props.quota && Array.isArray(props.quota.disabledModels))
+        ? props.quota.disabledModels
+        : (Array.isArray(row.disabledModels) ? row.disabledModels : [])
       const busy = props.busy === true
       const running = (kind) => props.runningKind === kind
       const ticket = props.ticket
@@ -1683,6 +1718,7 @@ window.__ModuleLoader__.load({
                 tierBadge(row.subscriptionTier || (props.quota && props.quota.subscriptionTier), row.subscriptionName || (props.quota && props.quota.subscriptionName)),
                 isTosSuspended ? h('span', { className: 'dsh-agy-badge dsh-agy-badge-danger', 'data-agy-tos-badge': 'true' }, t('Suspended', '已封禁')) : null,
                 !isTosSuspended && hasVerify ? h('span', { className: 'dsh-agy-badge dsh-agy-badge-warn', 'data-agy-verify-badge': 'true' }, t('Verify', '需验证')) : null,
+                !isTosSuspended && !hasVerify && authError ? h('span', { className: 'dsh-agy-badge dsh-agy-badge-warn', 'data-agy-auth-badge': 'true', title: authError }, t('Token expired', '凭据失效')) : null,
                 downgradeAlert ? h('span', { className: 'dsh-agy-badge dsh-agy-badge-warn', 'data-agy-downgrade-badge': 'true' }, `${downgradeAlert.fromTier}→${downgradeAlert.toTier}`) : null,
                 schedBadge(row)),
               h('div', { className: 'dsh-agy-account-sub' },
@@ -1699,7 +1735,7 @@ window.__ModuleLoader__.load({
                     ? h('span', {}, t('All global models', '跟随全局模型'))
                     : null)))),
           h('div', { className: 'dsh-agy-account-actions' },
-            isWindows && !isActive && (signedIn(row) || row.hasRefreshToken === true) && typeof props.onSwitchAccount === 'function'
+            isWindows && !isActive && !isTosSuspended && !hasVerify && !authError && (signedIn(row) || row.hasRefreshToken === true) && typeof props.onSwitchAccount === 'function'
               ? h(SmallButton, {
                 variant: 'primary',
                 className: 'dsh-agy-btn-row',
@@ -1761,6 +1797,33 @@ window.__ModuleLoader__.load({
             typeof props.onAckDowngrade === 'function'
               ? h(SmallButton, { className: 'dsh-agy-btn-mini', 'data-agy-ack-downgrade-btn': id, disabled: busy, onClick: () => props.onAckDowngrade() }, running('ack-downgrade') ? '…' : t('Dismiss', '知道了'))
               : null)) : null,
+        !isTosSuspended && !hasVerify && authError ? h('div', { role: 'alert', className: 'dsh-agy-health-banner dsh-agy-health-banner-warn', 'data-agy-health-banner': 'auth' },
+          h('span', { className: 'dsh-agy-health-banner-text' },
+            t('OAuth credential expired or was revoked. Sign in again or re-import a fresh backup to refresh this account.', '该账号的 OAuth 凭据已失效或被撤销，请重新登录或重新导入凭据备份以更新状态。')),
+          h('span', { className: 'dsh-agy-health-banner-actions' },
+            h(SmallButton, { className: 'dsh-agy-btn-mini', disabled: busy, onClick: () => props.onLogin() }, running('login') ? '…' : t('Sign in again', '重新登录')),
+            typeof props.onRecheck === 'function'
+              ? h(SmallButton, { className: 'dsh-agy-btn-mini', 'data-agy-recheck-btn': id, disabled: busy, onClick: () => props.onRecheck() }, running('recheck') ? '…' : t('Recheck', '重新检测'))
+              : null)) : null,
+        (cardEntitled.length > 0 || cardDisabled.length > 0) ? h('div', { className: 'dsh-agy-account-models', 'data-agy-account-models': id },
+          h('div', { className: 'dsh-agy-account-models-head' },
+            h('span', {}, t(`Upstream open models (${cardEntitled.length})`, `上游开放模型 (${cardEntitled.length})`)),
+            cardDisabled.length > 0
+              ? h('span', {}, t(`Unavailable: ${cardDisabled.join(', ')}`, `未开放：${cardDisabled.join(', ')}`))
+              : null),
+          h('div', { className: 'dsh-agy-account-models-chips' },
+            ...cardEntitled.map((model) => h('span', {
+              key: model.id,
+              className: 'dsh-agy-model-chip',
+              'data-agy-model-chip': model.id,
+              title: model.id,
+            }, model.name || model.id)),
+            ...cardDisabled.map((mid) => h('span', {
+              key: `disabled-${mid}`,
+              className: 'dsh-agy-model-chip dsh-agy-model-chip-disabled',
+              'data-agy-model-disabled': mid,
+              title: t('Disabled on this subscription', '当前订阅未开放'),
+            }, mid)))) : null,
         props.quotaOpen ? h(AccountQuotaDrawer, {
           row,
           quota: props.quota,
@@ -1856,6 +1919,15 @@ window.__ModuleLoader__.load({
             onClick: () => props.onRelogin(),
             className: 'dsh-agy-btn-dialog-start',
           }, t('Sign in again', '重新登录')),
+          (signedIn(row) || row.hasRefreshToken === true) && typeof props.onExportBackup === 'function'
+            ? h(SmallButton, {
+              key: 'export-backup',
+              disabled: busy,
+              'data-agy-export-backup-btn': row.id,
+              onClick: () => props.onExportBackup(),
+              className: 'dsh-agy-btn-dialog',
+            }, running('export') ? '…' : t('Export backup', '导出备份'))
+            : null,
           h(SmallButton, {
             key: 'cancel',
             disabled: busy,
@@ -1869,7 +1941,7 @@ window.__ModuleLoader__.load({
             onClick: () => props.onSave(),
             className: 'dsh-agy-btn-dialog',
           }, running('save') ? '…' : t('Save', '保存')),
-        ],
+        ].filter(Boolean),
       },
       h('div', { className: 'dsh-agy-editor-modal', 'data-agy-editor-modal': row.id },
         h('label', { className: 'dsh-agy-inline-row' },
@@ -1982,7 +2054,8 @@ window.__ModuleLoader__.load({
               ...row.tierHistory.slice(-5).map((entry, idx) => h('span', { key: `${entry.at || idx}-${idx}` },
                 `${entry.tier}${Number.isFinite(entry.modelCount) ? ` (${entry.modelCount})` : ''}${typeof entry.at === 'string' ? ` · ${entry.at.slice(0, 10)}` : ''}`))))
           : null,
-        props.error ? h('div', { role: 'alert', className: 'dsh-agy-row-alert' }, props.error) : null))
+        props.error ? h('div', { role: 'alert', className: 'dsh-agy-row-alert' }, props.error) : null,
+        props.notice ? h('div', { role: 'status', className: 'dsh-agy-row-notice', 'data-agy-editor-notice': row.id }, props.notice) : null))
     }
 
     /**
@@ -2230,6 +2303,7 @@ window.__ModuleLoader__.load({
         props.client.quota({ accountId: row.id, force: force === true }).then((snapshot) => {
           setQuotas((prev) => ({ ...prev, [row.id]: snapshot }))
           if (snapshot && ((snapshot.status === 'ok' && (snapshot.subscriptionTier || snapshot.availableModels))
+            || snapshot.status === 'error'
             || snapshot.verificationRequired === true
             || snapshot.tosSuspended === true
             || snapshot.downgradeAlert !== undefined)) {
@@ -2363,6 +2437,24 @@ window.__ModuleLoader__.load({
         }
       }
 
+      const exportBackup = async (row) => {
+        if (typeof props.client.exportCredential !== 'function') return
+        setPending({ id: row.id, kind: 'export' })
+        remember(setRowErrors, row.id, null)
+        remember(setRowNotices, row.id, null)
+        try {
+          const result = await props.client.exportCredential({ accountId: row.id })
+          const savedPath = result && typeof result.filePath === 'string' ? result.filePath : ''
+          remember(setRowNotices, row.id, savedPath
+            ? t(`Exported backup to ${savedPath}`, `已安全导出凭据备份至：${savedPath}`)
+            : t('Exported credential backup', '已安全导出凭据备份'))
+        } catch (error) {
+          remember(setRowErrors, row.id, messageOf(error))
+        } finally {
+          setPending(null)
+        }
+      }
+
       const recheckAccount = async (row) => {
         if (typeof props.client.recheckAccount !== 'function') return
         setPending({ id: row.id, kind: 'recheck' })
@@ -2379,6 +2471,8 @@ window.__ModuleLoader__.load({
             remember(setRowErrors, row.id, t('Account is still suspended for ToS violation', '该账号仍处于服务条款（ToS）停用状态'))
           } else if (q && q.verificationRequired === true) {
             remember(setRowErrors, row.id, t('Verification is still required — complete it in your browser first', '仍需完成浏览器验证，请先点击「前往验证」'))
+          } else if (q && q.status === 'error') {
+            remember(setRowErrors, row.id, q.error || t('Recheck failed', '重新检测失败'))
           } else {
             remember(setRowNotices, row.id, t('Recheck passed — account is healthy', '重新检测通过，账号状态正常'))
           }
@@ -2402,6 +2496,22 @@ window.__ModuleLoader__.load({
           setPending(null)
         }
       }
+
+      // Clear stale cached quota drawers when the parent SettingsCard runs an explicit Refresh.
+      const openQuotasRef = React.useRef(openQuotas)
+      openQuotasRef.current = openQuotas
+      const rowsRef = React.useRef(rows)
+      rowsRef.current = rows
+      React.useEffect(() => {
+        if (!props.refreshNonce) return
+        setQuotas({})
+        const openMap = openQuotasRef.current || {}
+        for (const item of rowsRef.current) {
+          if (item && openMap[item.id]) {
+            loadAccountQuota(item, true)
+          }
+        }
+      }, [props.refreshNonce])
 
       // Hydrate keychain emails on mount and auto-detect external terminal sign-ins while any ticket is open.
       const openTicketIds = Object.keys(tickets).filter((key) => tickets[key] !== null && tickets[key] !== undefined).join(',')
@@ -2570,9 +2680,11 @@ window.__ModuleLoader__.load({
           runningKind: activeEditorRow !== null && busyId === activeEditorRow.id ? pending.kind : null,
           client: props.client,
           error: activeEditorRow === null ? null : (rowErrors[activeEditorRow.id] || null),
+          notice: activeEditorRow === null ? null : (rowNotices[activeEditorRow.id] || null),
           onClose: closeEditor,
           onSave: () => { void saveEditor(activeEditorRow) },
           onRelogin: () => { setEditorId(null); void beginLogin(activeEditorRow) },
+          onExportBackup: typeof props.client.exportCredential === 'function' ? () => { void exportBackup(activeEditorRow) } : undefined,
           onDraftChange: (patch) => setDraft(activeEditorRow.id, patch),
         }))
     }
@@ -2872,7 +2984,7 @@ window.__ModuleLoader__.load({
         if (modelFamily === 'claude') return typeof qs.claude === 'number' ? qs.claude : (typeof qs.primary === 'number' ? qs.primary : null)
         if (modelFamily === 'argon') {
           if (typeof qs.argon === 'number') return qs.argon
-          if (acc.subscriptionTier === 'ULTRA' && typeof qs.gemini === 'number') return qs.gemini
+          if ((acc.subscriptionTier === 'ULTRA' || acc.argonSharedWithGemini === true) && typeof qs.gemini === 'number') return qs.gemini
           return null
         }
         return typeof qs.gemini === 'number' ? qs.gemini : (typeof qs.primary === 'number' ? qs.primary : null)
@@ -3145,7 +3257,10 @@ window.__ModuleLoader__.load({
             h('div', { className: 'dsh-agy-session-acc-list', role: 'listbox', 'aria-label': t('Switch session account', '切换当前会话账号') },
               ...statusAccounts.map((acc) => {
                 const isSelected = acc.id === currentAccountId
-                const canSelect = signedIn(acc) || acc.hasRefreshToken === true
+                const hasCred = signedIn(acc) || acc.hasRefreshToken === true
+                const hasAuthError = typeof acc.authError === 'string' && acc.authError.trim().length > 0
+                const blocked = acc.tosSuspended === true || acc.verificationRequired === true || hasAuthError
+                const canSelect = hasCred && !blocked
                 const rowTier = acc.subscriptionTier ? String(acc.subscriptionTier).toUpperCase() : ''
                 const rowTierCls = rowTier === 'ULTRA'
                   ? 'dsh-agy-session-tier dsh-agy-session-tier-ultra'
@@ -3166,8 +3281,9 @@ window.__ModuleLoader__.load({
                   'data-agy-pill-account-selected': isSelected ? 'true' : 'false',
                   disabled: !canSelect || switchingId !== null,
                   style: statusAccounts.length < 2 && isSelected ? { cursor: 'default' } : undefined,
-                  title: [displayName, rowSubtitle, acc.subscriptionName || rowTier].filter(Boolean).join(' · '),
+                  title: [displayName, rowSubtitle, acc.subscriptionName || rowTier, hasAuthError ? acc.authError : ''].filter(Boolean).join(' · '),
                   onClick: () => {
+                    if (!canSelect) return
                     if (isSelected && (pinnedAccountId === acc.id || statusAccounts.length < 2)) return
                     void switchSessionAccount(acc.id)
                   },
@@ -3182,11 +3298,13 @@ window.__ModuleLoader__.load({
                       ? h('span', { style: { color: '#d9534f', fontWeight: 600 } }, t('Suspended', '已封禁'))
                       : acc.verificationRequired === true
                         ? h('span', { style: { color: '#b7791f', fontWeight: 600 } }, t('Verify', '需验证'))
-                        : !canSelect
-                          ? h('span', { style: { opacity: 0.58 } }, t('Signed out', '未登录'))
-                          : frac !== null
-                            ? h('span', { style: { opacity: 0.85, color: frac < 0.15 ? '#d9534f' : 'inherit' } }, pct(frac))
-                            : null))
+                        : hasAuthError
+                          ? h('span', { 'data-agy-pill-auth-expired': 'true', style: { color: '#b7791f', fontWeight: 600 } }, t('Expired', '凭据失效'))
+                          : !hasCred
+                            ? h('span', { style: { opacity: 0.58 } }, t('Signed out', '未登录'))
+                            : frac !== null
+                              ? h('span', { style: { opacity: 0.85, color: frac < 0.15 ? '#d9534f' : 'inherit' } }, pct(frac))
+                              : null))
               })),
             statusAccounts.length === 1 ? h('div', {
               'data-agy-single-account-hint': 'true',
@@ -3252,13 +3370,17 @@ window.__ModuleLoader__.load({
       { value: 'xhigh', label: 'XHigh' },
     ]
 
-    /** Context-window choices, shared by the Settings row and the menu row. */
-    const windowOptions = () => [
-      { value: 0, label: t('Auto (1M)', '自动 (1M)') },
-      { value: 900000, label: '900K' },
-      { value: 512000, label: '512K' },
-      { value: 256000, label: '256K' },
-    ]
+    /** Context-window choices, shared by the Settings row, account editor, and composer menu row. */
+    const windowOptions = (status) => {
+      const locked = !!(status && status.unlock && status.unlock.status && status.unlock.status !== 'unlocked')
+      return [
+        { value: 0, label: locked ? t('Auto (256K · locked)', '自动 (256K · 未解锁)') : t('Auto (1M)', '自动 (1M)') },
+        { value: 1048576, label: '1M' },
+        { value: 900000, label: '900K' },
+        { value: 512000, label: '512K' },
+        { value: 256000, label: '256K' },
+      ]
+    }
 
     /** Route-health intervention levels for Gemini 4 flagship (Argon / Carbon / Neon / Hydrogen) steps the fingerprint flags. */
     const degradeOptions = () => [
@@ -3373,6 +3495,7 @@ window.__ModuleLoader__.load({
       const [status, setStatus] = React.useState(null)
       const [error, setError] = React.useState(null)
       const [refreshing, setRefreshing] = React.useState(false)
+      const [refreshNonce, setRefreshNonce] = React.useState(0)
       const [busy, setBusy] = React.useState(false)
       // Accordion: at most one choice row is expanded at a time.
       const [openKey, setOpenKey] = React.useState(null)
@@ -3384,6 +3507,7 @@ window.__ModuleLoader__.load({
           setStatus(s)
           rememberSettings(s)
           setError(s.error || null)
+          if (warm) setRefreshNonce((n) => n + 1)
         } catch (e) {
           setError(e instanceof Error ? e.message : String(e))
         } finally {
@@ -3445,7 +3569,15 @@ window.__ModuleLoader__.load({
           stateText),
         h('span', { className: 'dsh-agy-tag' }, `v${(status && status.version) || '—'}`),
         h('span', { className: 'dsh-agy-tag' }, tokens((status && status.contextWindow) || 0)),
-        status && status.unlock && status.unlock.status === 'unlocked' ? h('span', { className: 'dsh-agy-tag' }, t('Unlocked', '已解锁')) : null)
+        status && status.unlock && status.unlock.status === 'unlocked'
+          ? h('span', { className: 'dsh-agy-tag', 'data-agy-unlock': 'unlocked' }, t('Unlocked', '已解锁'))
+          : (status && status.unlock && status.unlock.status
+            ? h('span', {
+              className: 'dsh-agy-badge dsh-agy-badge-warn',
+              'data-agy-unlock': status.unlock.status,
+              title: status.unlock.detail || '',
+            }, t('Locked 256K', '未解锁 256K'))
+            : null))
       return h('section', { className: 'antigravity-settings-card' },
         h('div', { className: 'dsh-agy-header' },
           h('h3', { style: { margin: 0, fontSize: 16, fontWeight: 600, lineHeight: '24px' } }, 'Antigravity'),
@@ -3460,7 +3592,7 @@ window.__ModuleLoader__.load({
             h(InfoRow, { label: t('Status', '状态') }, statusBadges),
             h(ChoiceRow, {
               label: t('Window', '上下文窗口'),
-              options: windowOptions(),
+              options: windowOptions(status),
               value: status.configuredContextWindow ?? 0,
               disabled: busy,
               open: openKey === 'window',
@@ -3534,12 +3666,14 @@ window.__ModuleLoader__.load({
           status ? h(MS.ModelSelectionBlock, {
             adapter: antigravityModelAdapter(props.client),
             disabled: busy,
+            externalStatus: status,
             onStatus: adoptStatus,
           }) : null,
           status ? h(AccountsPanel, {
             accounts: status.accounts,
             platform: status.platform,
             activeAccountId: status.activeAccountId,
+            refreshNonce,
             client: props.client,
             onStatus: adoptStatus,
           }) : null),
@@ -3632,7 +3766,7 @@ window.__ModuleLoader__.load({
         h(ChoiceRow, {
           menu: true,
           label: t('Context', '上下文'),
-          options: windowOptions(),
+          options: windowOptions(status),
           value: status ? status.configuredContextWindow ?? 0 : 0,
           disabled: props.locked || busy,
           open: openKey === 'context',

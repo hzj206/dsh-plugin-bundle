@@ -7,7 +7,7 @@
  * @module dsh-llm-antigravity-acp/runtime
  */
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { LlmError } from '@deepseek-ai/dsh-llm';
@@ -19,7 +19,7 @@ import { ModelCatalog, intersectVisible, isListedModel, nearestEffort } from './
 import { isTosSuspensionText, isVerificationText } from './cloudcode.js';
 import { asDegradeAction, asEffort, asEngineMode, current, EFFORTS } from './config.js';
 import { AcpTurn, AWAIT_TOOL, AWAIT_TOOL_NAME, CALL_TOOL, CALL_TOOL_NAME, degradedRouteError, isReanswerFailure, pumpStep, relayNotice } from './conversation.js';
-import { readStoredCredentialFileRaw, unlockAccountKeychain, writeSlotCredentialFile } from './credential.js';
+import { readStoredCredentialFileRaw, readStoredCredentialRaw, unlockAccountKeychain, writeSlotCredentialFile } from './credential.js';
 import { AGENT_TOOL_PREFIX, inputPrompt, LOCKED_REPLAY_BUDGET_BYTES, prepareNativeRequest, renderFullToolContracts, renderTranscript, replayPrompt, splitSystem, UNLOCKED_REPLAY_BUDGET_BYTES, } from './history.js';
 import { labeled } from './labels.js';
 import { JsonRpcClosedError, JsonRpcRemoteError } from './jsonrpc.js';
@@ -160,6 +160,9 @@ export class AntigravityRuntime {
         return {
             useWindowsCredentialManager: slot.layout.system,
             syncFileOnWinCredRead: slot.layout.system,
+            // Non-system Windows slots run `agy` with `USERPROFILE=<slot.homeDir>` and
+            // `WSL_INTEROP=dsh-isolated-slot`, so CLI fallback stays strictly isolated
+            // to that slot and never reads Windows Credential Manager.
             allowCliFallback: true,
         };
     }
@@ -448,7 +451,7 @@ export class AntigravityRuntime {
         this.recomputeUnionCatalog();
         void this.refreshAccountEmails();
     }
-    noteQuotaHealth(slot, snapshot) {
+    noteQuotaHealth(slot, snapshot, observedModels) {
         if (snapshot.verificationRequired === true) {
             slot.verificationRequired = true;
             slot.verificationUrl = snapshot.verificationUrl ?? slot.verificationUrl;
@@ -456,39 +459,95 @@ export class AntigravityRuntime {
         else if (snapshot.status === 'ok') {
             slot.verificationRequired = false;
             slot.verificationUrl = undefined;
+            slot.authError = undefined;
+            this.health?.clearAuthError(slot.layout.id);
+        }
+        else if (snapshot.tosSuspended !== true
+            && typeof snapshot.error === 'string'
+            && /HTTP 401|expired|revoked|unauthorized|invalid_grant/i.test(snapshot.error)) {
+            slot.authError = snapshot.error;
+            this.health?.recordAuthError(slot.layout.id, {
+                ...(slot.email !== undefined ? { email: slot.email } : {}),
+                error: snapshot.error,
+            });
         }
         if (snapshot.tosSuspended === true) {
-            this.health.recordTosSuspended(slot.layout.id, {
+            this.health?.recordTosSuspended(slot.layout.id, {
                 ...(slot.email !== undefined ? { email: slot.email } : {}),
                 error: snapshot.error ?? 'Terms of Service suspension',
                 ...(snapshot.tosAppealUrl !== undefined ? { appealUrl: snapshot.tosAppealUrl } : {}),
             });
         }
         else if (snapshot.status === 'ok' && snapshot.subscriptionTier !== undefined) {
-            const modelCount = snapshot.availableModels?.length ?? slot.availableModels?.length ?? 0;
-            this.health.observeSubscription(slot.layout.id, {
+            const models = observedModels !== undefined && observedModels.length > 0
+                ? observedModels
+                : (snapshot.availableModels !== undefined && snapshot.availableModels.length > 0
+                    ? snapshot.availableModels
+                    : slot.availableModels);
+            const modelCount = models?.length ?? 0;
+            this.health?.observeSubscription(slot.layout.id, {
                 ...(slot.email !== undefined ? { email: slot.email } : {}),
                 tier: snapshot.subscriptionTier,
                 ...(snapshot.subscriptionName !== undefined ? { subscriptionName: snapshot.subscriptionName } : {}),
                 modelCount,
+                ...(models !== undefined && models.length > 0 ? { availableModels: models } : {}),
+                ...(snapshot.disabledModels !== undefined ? { disabledModels: snapshot.disabledModels } : {}),
+                ...(snapshot.argonSharedWithGemini !== undefined ? { argonSharedWithGemini: snapshot.argonSharedWithGemini } : {}),
             });
         }
     }
+    mergeSlotOrchestrators(slot, baseModels, disabledModels) {
+        const merged = baseModels.map(m => ({ ...m }));
+        const baseIds = new Set(merged.map(m => m.id));
+        const healthRec = this.health?.get(slot.layout.id);
+        const sameIdentity = healthRec !== undefined && (slot.email === undefined
+            || healthRec.email === undefined
+            || slot.email.trim().toLowerCase() === healthRec.email.trim().toLowerCase());
+        const candidates = slot.acpModels
+            ?? (sameIdentity ? healthRec?.lastAvailableModels : undefined)
+            ?? [];
+        const extras = [];
+        for (const item of candidates) {
+            if (!/orchestrator/i.test(item.id) || baseIds.has(item.id))
+                continue;
+            if (!orchestratorAllowedByBase(item.id, baseIds, disabledModels))
+                continue;
+            baseIds.add(item.id);
+            extras.push({ id: item.id, name: item.name });
+        }
+        if (extras.length === 0)
+            return merged;
+        let insertAt = -1;
+        for (let i = 0; i < merged.length; i += 1) {
+            if (merged[i].id.toLowerCase().startsWith('gemini-4-'))
+                insertAt = i + 1;
+        }
+        if (insertAt >= 0)
+            merged.splice(insertAt, 0, ...extras);
+        else
+            merged.push(...extras);
+        return merged;
+    }
     applyQuotaToSlot(slot, snapshot) {
-        this.noteQuotaHealth(slot, snapshot);
+        slot.authError = undefined;
         if (snapshot.subscriptionTier !== undefined)
             slot.subscriptionTier = snapshot.subscriptionTier;
         if (snapshot.subscriptionName !== undefined)
             slot.subscriptionName = snapshot.subscriptionName;
         if (snapshot.disabledModels !== undefined)
             slot.disabledModels = [...snapshot.disabledModels];
+        if (snapshot.argonSharedWithGemini !== undefined)
+            slot.argonSharedWithGemini = snapshot.argonSharedWithGemini;
         if (snapshot.effortsByModel !== undefined)
             slot.effortsByModel = { ...snapshot.effortsByModel };
         if (snapshot.maxTokensByModel !== undefined)
             slot.maxTokensByModel = { ...snapshot.maxTokensByModel };
+        let mergedModels;
         if (snapshot.availableModels !== undefined && snapshot.availableModels.length > 0) {
-            slot.availableModels = snapshot.availableModels.map(m => ({ ...m }));
+            mergedModels = this.mergeSlotOrchestrators(slot, snapshot.availableModels, snapshot.disabledModels ?? []);
+            slot.availableModels = mergedModels;
         }
+        this.noteQuotaHealth(slot, snapshot, mergedModels);
         for (const group of snapshot.groups) {
             const weekly = group.buckets.find(b => isWeeklyBucket(b) && !b.disabled);
             if (weekly !== undefined && weekly.remainingFraction <= 0.005 && weekly.resetTime.length > 0) {
@@ -529,7 +588,9 @@ export class AntigravityRuntime {
     observeSlotCatalog(slot, options, available) {
         const modelOption = options?.find(o => o.id === 'model' || o.category === 'model');
         if (modelOption?.options !== undefined && modelOption.options.length > 0) {
-            slot.availableModels = modelOption.options.map(o => ({ id: o.value, name: o.name ?? o.value }));
+            const observed = modelOption.options.map(o => ({ id: o.value, name: o.name ?? o.value }));
+            slot.acpModels = observed.map(m => ({ ...m }));
+            slot.availableModels = observed;
             if (available !== undefined && available.length > 0) {
                 const map = { ...(slot.effortsByModel ?? {}) };
                 for (const model of slot.availableModels) {
@@ -537,6 +598,17 @@ export class AntigravityRuntime {
                     map[model.id] = [...offered];
                 }
                 slot.effortsByModel = map;
+            }
+            if (slot.subscriptionTier !== undefined && this.health !== undefined) {
+                this.health.observeSubscription(slot.layout.id, {
+                    ...(slot.email !== undefined ? { email: slot.email } : {}),
+                    tier: slot.subscriptionTier,
+                    ...(slot.subscriptionName !== undefined ? { subscriptionName: slot.subscriptionName } : {}),
+                    modelCount: observed.length,
+                    availableModels: observed,
+                    ...(slot.disabledModels !== undefined ? { disabledModels: slot.disabledModels } : {}),
+                    ...(slot.argonSharedWithGemini !== undefined ? { argonSharedWithGemini: slot.argonSharedWithGemini } : {}),
+                });
             }
             if (this.recomputeUnionCatalog()) {
                 this.host.onModelsChanged();
@@ -574,10 +646,10 @@ export class AntigravityRuntime {
                 if (this.identityEpoch !== epoch)
                     return;
                 if (snap !== undefined) {
-                    this.noteQuotaHealth(slot, snap);
-                    if (snap.status === 'ok') {
+                    if (snap.status === 'ok')
                         this.applyQuotaToSlot(slot, snap);
-                    }
+                    else
+                        this.noteQuotaHealth(slot, snap);
                 }
             }
         }));
@@ -703,10 +775,14 @@ export class AntigravityRuntime {
             await unlockAccountKeychain(slot.layout, this.host.runCommand);
         const credOpts = this.credentialOptionsFor(slot);
         const snapshot = await this.quota.readFor(id, slot.env, force, slot.layout, credOpts);
-        this.noteQuotaHealth(slot, snapshot);
         if (snapshot.status === 'ok')
             this.applyQuotaToSlot(slot, snapshot);
-        return this.decorateQuotaHealth(id, snapshot);
+        else
+            this.noteQuotaHealth(slot, snapshot);
+        const effective = snapshot.status === 'ok' && slot.availableModels !== undefined && slot.availableModels.length > 0
+            ? { ...snapshot, availableModels: slot.availableModels.map(m => ({ ...m })) }
+            : snapshot;
+        return this.decorateQuotaHealth(id, effective);
     }
     decorateQuotaHealth(accountId, snapshot) {
         const slot = this.slots.get(accountId);
@@ -780,7 +856,7 @@ export class AntigravityRuntime {
             merged.subscriptionTier = slot.subscriptionTier;
         if (merged.subscriptionName === undefined && slot.subscriptionName !== undefined)
             merged.subscriptionName = slot.subscriptionName;
-        if (merged.argonSharedWithGemini === undefined && slot.subscriptionTier === 'ULTRA')
+        if (merged.argonSharedWithGemini === undefined && (slot.argonSharedWithGemini === true || slot.subscriptionTier === 'ULTRA'))
             merged.argonSharedWithGemini = true;
         return merged;
     }
@@ -887,13 +963,32 @@ export class AntigravityRuntime {
         return this.pool.list().map((layout) => {
             const slot = this.slots.get(layout.id);
             const ownAllow = accountVisibleModels(layout.visibleModels);
-            const slotCatalog = slot?.availableModels ?? this.catalog.availableModels().map(m => ({ id: m.id, name: m.name }));
+            const healthRec = this.health.get(layout.id);
+            const sameHealthIdentity = healthRec !== undefined && (slot?.email === undefined
+                || healthRec.email === undefined
+                || slot.email.trim().toLowerCase() === healthRec.email.trim().toLowerCase());
+            const cachedTier = sameHealthIdentity
+                && (healthRec?.lastTier === 'ULTRA' || healthRec?.lastTier === 'PRO' || healthRec?.lastTier === 'FREE' || healthRec?.lastTier === 'ENTERPRISE')
+                ? healthRec.lastTier
+                : undefined;
+            const subscriptionTier = slot?.subscriptionTier ?? cachedTier;
+            const subscriptionName = slot?.subscriptionName ?? (sameHealthIdentity ? healthRec?.lastSubscriptionName : undefined);
+            const observedModels = slot?.availableModels
+                ?? (sameHealthIdentity && healthRec?.lastAvailableModels !== undefined && healthRec.lastAvailableModels.length > 0
+                    ? healthRec.lastAvailableModels
+                    : undefined);
+            const disabledModels = slot?.disabledModels
+                ?? (sameHealthIdentity ? healthRec?.lastDisabledModels : undefined);
+            const argonSharedWithGemini = slot?.argonSharedWithGemini
+                ?? (sameHealthIdentity ? healthRec?.lastArgonSharedWithGemini : undefined);
+            const authError = slot?.authError
+                ?? (sameHealthIdentity ? healthRec?.authError : undefined);
+            const slotCatalog = observedModels ?? this.catalog.availableModels().map(m => ({ id: m.id, name: m.name }));
             const accountAvailable = slotCatalog.map(m => ({
                 id: m.id,
                 name: m.name,
                 enabled: isListedModel(m.id, ownAllow),
             }));
-            const healthRec = this.health.get(layout.id);
             const activeFlag = this.activeAccountId !== undefined
                 ? layout.id === this.activeAccountId
                 : undefined;
@@ -954,10 +1049,13 @@ export class AntigravityRuntime {
                 ...(healthRec !== undefined && healthRec.tierHistory.length > 0
                     ? { tierHistory: healthRec.tierHistory }
                     : {}),
-                ...(slot?.subscriptionTier !== undefined ? { subscriptionTier: slot.subscriptionTier } : {}),
-                ...(slot?.subscriptionName !== undefined ? { subscriptionName: slot.subscriptionName } : {}),
+                ...(subscriptionTier !== undefined ? { subscriptionTier } : {}),
+                ...(subscriptionName !== undefined ? { subscriptionName } : {}),
                 availableModels: accountAvailable,
-                ...(slot?.disabledModels !== undefined && slot.disabledModels.length > 0 ? { disabledModels: [...slot.disabledModels] } : {}),
+                entitledModels: observedModels !== undefined ? observedModels.map(m => ({ id: m.id, name: m.name })) : [],
+                ...(disabledModels !== undefined && disabledModels.length > 0 ? { disabledModels: [...disabledModels] } : {}),
+                ...(argonSharedWithGemini === true ? { argonSharedWithGemini: true } : {}),
+                ...(authError !== undefined ? { authError } : {}),
                 contextWindow: layout.contextWindow,
                 visibleModels: [...layout.visibleModels],
                 priority: layout.priority,
@@ -1044,6 +1142,7 @@ export class AntigravityRuntime {
             target.email = await readAccountEmail(target.layout, this.host.runCommand, this.platform, this.credentialOptionsFor(target)).catch(() => undefined);
             if (target.email !== undefined && target.email.length > 0) {
                 const snap = await this.quotaFor(target.layout.id, true);
+                await this.refreshPreflightUnlock(target);
                 if (snap.status === 'ok' && snap.availableModels !== undefined && snap.availableModels.length > 0) {
                     this.lastError = undefined;
                     return;
@@ -1061,6 +1160,9 @@ export class AntigravityRuntime {
             && c.email.length > 0);
         if (signedIn.length > 0) {
             const snapshots = await Promise.all(signedIn.map(s => this.quotaFor(s.layout.id, true).catch(() => undefined)));
+            const primarySlot = this.slots.get(SYSTEM_ACCOUNT_ID) ?? signedIn[0];
+            if (primarySlot !== undefined)
+                await this.refreshPreflightUnlock(primarySlot);
             if (snapshots.some(s => s !== undefined && s.status === 'ok' && s.availableModels !== undefined && s.availableModels.length > 0)) {
                 this.lastError = undefined;
                 return;
@@ -1127,6 +1229,12 @@ export class AntigravityRuntime {
         const slot = this.slots.get(accountId);
         if (slot === undefined)
             return true;
+        const healthRec = this.health.get(accountId);
+        if (healthRec?.tosSuspended === true
+            || slot.verificationRequired === true
+            || (slot.authError ?? healthRec?.authError) !== undefined) {
+            return false;
+        }
         if (slotDisablesModel(slot, model)) {
             return false;
         }
@@ -1235,7 +1343,8 @@ export class AntigravityRuntime {
                                 ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs },
                             }),
                             cool: () => {
-                                const transientKey = cooldownKey === 'argon' && slot.subscriptionTier !== 'ULTRA' ? 'argon' : family;
+                                const sharedArgon = slot.subscriptionTier === 'ULTRA' || slot.argonSharedWithGemini === true;
+                                const transientKey = cooldownKey === 'argon' && !sharedArgon ? 'argon' : family;
                                 this.pool.exhaust(layout.id, transientKey, Date.now() + (retryAfterMs ?? TRANSIENT_COOLDOWN_MS), message);
                             },
                             log: `antigravity-acp: account "${layout.id}" is briefly rate limited on ${options.model} (${message}); cooling down and moving to the next account`,
@@ -1248,7 +1357,8 @@ export class AntigravityRuntime {
                     const message = error instanceof Error ? error.message : String(error);
                     await this.failover(conv, slot, options.model, attempted, {
                         cool: () => {
-                            const parkKey = cooldownKey === 'argon' && slot.subscriptionTier !== 'ULTRA' ? 'argon' : family;
+                            const sharedArgon = slot.subscriptionTier === 'ULTRA' || slot.argonSharedWithGemini === true;
+                            const parkKey = cooldownKey === 'argon' && !sharedArgon ? 'argon' : family;
                             this.pool.exhaustFor(layout.id, parkKey, resetTimeFromError(error), message);
                         },
                         log: `antigravity-acp: account "${layout.id}" cannot serve ${options.model} (${message}); moving to the next account`,
@@ -1622,6 +1732,14 @@ export class AntigravityRuntime {
             const failed = attempted.has(layout.id) ? ' (failed this step)' : '';
             if (!layout.enabled)
                 return `${layout.id} disabled${failed}`;
+            const slot = this.slots.get(layout.id);
+            const healthRec = this.health.get(layout.id);
+            if (healthRec?.tosSuspended === true)
+                return `${layout.id} suspended (ToS)${failed}`;
+            if (slot?.verificationRequired === true)
+                return `${layout.id} verification required${failed}`;
+            if ((slot?.authError ?? healthRec?.authError) !== undefined)
+                return `${layout.id} auth expired${failed}`;
             if (!this.servesModel(layout.id, model) || this.accountDeniesModel(layout.id, model)) {
                 return `${layout.id} not entitled to ${model}${failed}`;
             }
@@ -1782,6 +1900,15 @@ export class AntigravityRuntime {
             throw mapError(error);
         }
     }
+    binaryStatSignature(binary) {
+        try {
+            const st = statSync(binary);
+            return `${st.size}:${Math.trunc(st.mtimeMs)}`;
+        }
+        catch {
+            return undefined;
+        }
+    }
     runPreflightSlot(slot) {
         if (slot.preflight !== undefined)
             return Promise.resolve(slot.preflight);
@@ -1811,10 +1938,35 @@ export class AntigravityRuntime {
                 unlock,
             };
             slot.preflight = result;
+            slot.preflightBinarySig = this.binaryStatSignature(binary);
             this.host.onModelsChanged();
             return result;
         })().finally(() => { slot.preflightPromise = undefined; });
         return slot.preflightPromise;
+    }
+    async refreshPreflightUnlock(slot) {
+        if (slot.preflight === undefined) {
+            await this.runPreflightSlot(slot).catch(() => undefined);
+            return;
+        }
+        const currentSig = this.binaryStatSignature(slot.preflight.binary);
+        const binaryChanged = currentSig !== undefined && currentSig !== slot.preflightBinarySig;
+        if (slot.preflight.unlock.status === 'unlocked' && !binaryChanged)
+            return;
+        const config = this.host.config;
+        const script = config.patchScript.length > 0 ? config.patchScript : defaultPatchScript();
+        const unlock = await checkUnlock(slot.preflight.binary, script, config.autoPatch, this.host.runCommand).catch(() => undefined);
+        if (unlock === undefined)
+            return;
+        const version = binaryChanged
+            ? await readVersion(slot.preflight.binary, this.host.runCommand).catch(() => slot.preflight.version)
+            : slot.preflight.version;
+        const prev = slot.preflight.unlock.status;
+        slot.preflight = { ...slot.preflight, version, unlock };
+        slot.preflightBinarySig = this.binaryStatSignature(slot.preflight.binary);
+        this.host.log.info(`antigravity-acp: [${slot.layout.id}] ${unlock.detail}`);
+        if (prev !== unlock.status)
+            this.host.onModelsChanged();
     }
     onProcessExit(proc, error) {
         for (const slot of this.slots.values()) {
@@ -2645,10 +2797,25 @@ export class AntigravityRuntime {
     }
     hasActiveTurnForSession(sessionId) {
         for (const conv of this.conversations.values()) {
-            if (conv.dshSessionId === sessionId && conv.turn !== undefined && !conv.turn.finished)
+            if (conv.dshSessionId !== sessionId)
+                continue;
+            if (conv.opening || (conv.turn !== undefined && !conv.turn.finished))
                 return true;
         }
         return false;
+    }
+    assertAccountSwitchable(slot) {
+        const healthRec = this.health.get(slot.layout.id);
+        if (healthRec?.tosSuspended === true) {
+            throw new Error(`antigravity-acp: 账号 "${slot.layout.id}" 因违反服务条款（ToS）已被停用，无法切换。请先申诉并在设置中点击「重新检测」。`);
+        }
+        if (slot.verificationRequired === true) {
+            throw new Error(`antigravity-acp: 账号 "${slot.layout.id}" 需要先在浏览器完成 Google 验证并点击「重新检测」。`);
+        }
+        const authErr = slot.authError ?? healthRec?.authError;
+        if (authErr !== undefined && authErr.trim().length > 0) {
+            throw new Error(`antigravity-acp: 账号 "${slot.layout.id}" 凭据已失效（${authErr}），请先在设置中重新登录或导入有效凭据。`);
+        }
     }
     /**
      * Bind one DSH conversation/session to a specific account (or unpin it back
@@ -2680,6 +2847,7 @@ export class AntigravityRuntime {
                     throw new Error('antigravity-acp: 请选择要切换的目标账号。');
                 }
                 let target = this.slotFor(accountId);
+                this.assertAccountSwitchable(target);
                 if (target.email === undefined && !target.hasRefreshToken) {
                     const identity = await readAccountIdentity(target.layout, this.host.runCommand, this.platform, this.credentialOptionsFor(target)).catch(() => ({ email: undefined, hasRefreshToken: false, raw: undefined }));
                     target.email = identity.email;
@@ -2731,6 +2899,7 @@ export class AntigravityRuntime {
         const release = await this.switchMutex.acquire('global-default');
         try {
             let target = this.slotFor(accountId);
+            this.assertAccountSwitchable(target);
             if (target.email === undefined && !target.hasRefreshToken) {
                 const identity = await readAccountIdentity(target.layout, this.host.runCommand, this.platform, this.credentialOptionsFor(target)).catch(() => ({ email: undefined, hasRefreshToken: false, raw: undefined }));
                 target.email = identity.email;
@@ -2800,7 +2969,11 @@ export class AntigravityRuntime {
         let payload = trimmed;
         if (!trimmed.startsWith('{') && !trimmed.startsWith('go-keyring-base64:') && existsSync(trimmed)) {
             try {
-                if (statSync(trimmed).isFile()) {
+                const st = statSync(trimmed);
+                if (st.isFile()) {
+                    if (st.size > 1_048_576) {
+                        throw new Error(`文件过大（${st.size} 字节，上限 1 MiB）`);
+                    }
                     payload = readFileSync(trimmed, 'utf8');
                 }
             }
@@ -2862,8 +3035,29 @@ export class AntigravityRuntime {
         await ensureLayout(targetSlot.layout, this.host.runCommand);
         this.identityEpoch += 1;
         writeSlotCredentialFile(targetSlot.layout, parsed.rawJson, true);
+        if (this.platform === 'win32' && targetSlot.layout.system) {
+            // If importing a refreshed credential into the system slot, also refresh
+            // WinCred only when WinCred is empty or already belongs to the same email.
+            const currentWinRaw = await readWindowsCredential(this.host.runCommand).catch(() => undefined);
+            const currentWinEmail = currentWinRaw !== undefined ? parseOAuthBlob(currentWinRaw)?.email?.toLowerCase() : undefined;
+            if (currentWinRaw !== parsed.rawJson
+                && (currentWinRaw === undefined || currentWinEmail === undefined || (emailLower !== undefined && currentWinEmail === emailLower))) {
+                await writeWindowsCredential(this.host.runCommand, parsed.rawJson, {
+                    requireRefreshToken: true,
+                    ...(parsed.email !== undefined ? { expectedEmail: parsed.email } : {}),
+                }).catch(() => undefined);
+            }
+        }
         targetSlot.email = parsed.email ?? targetSlot.email;
         targetSlot.hasRefreshToken = true;
+        targetSlot.verificationRequired = false;
+        targetSlot.verificationUrl = undefined;
+        targetSlot.authError = undefined;
+        this.health.clearAuthError(targetSlot.layout.id);
+        this.pool.clear(targetSlot.layout.id);
+        if (!created && (targetSlot.process !== undefined || targetSlot.starting !== undefined)) {
+            this.stopSlotProcess(targetSlot, `Imported credential for account "${targetSlot.layout.id}"; restarting ACP front.`);
+        }
         this.quota.clearAccount(targetSlot.layout.id);
         await this.quotaFor(targetSlot.layout.id, true).catch(() => undefined);
         if (this.recomputeUnionCatalog())
@@ -2874,6 +3068,60 @@ export class AntigravityRuntime {
             created,
             hasRefreshToken: parsed.hasRefreshToken,
             status: this.status(),
+        };
+    }
+    /**
+     * Safely export one account's permanent OAuth credential to a local 0600
+     * `agy_cred.ps1`-compatible backup JSON file under `<primaryHome>/credential-backups/`.
+     * Never returns tokens or raw credential blobs over RPC.
+     * @param accountId - account id to export.
+     * @returns metadata including the saved local file path.
+     */
+    async exportAccountCredential(accountId) {
+        const slot = this.slotFor(accountId);
+        const raw = await readStoredCredentialRaw(slot.layout, this.host.runCommand, this.platform, blob => parseOAuthBlob(blob) !== undefined, this.credentialOptionsFor(slot));
+        if (raw === undefined) {
+            throw new Error(`antigravity-acp: 账号 "${accountId}" 尚未登录或未找到本地凭据，无法导出备份。`);
+        }
+        const parsed = parseOAuthBlob(raw);
+        if (parsed === undefined) {
+            throw new Error(`antigravity-acp: 账号 "${accountId}" 的本地凭据格式无效，无法导出备份。`);
+        }
+        if (!parsed.hasRefreshToken) {
+            throw new Error(`antigravity-acp: 账号 "${accountId}" 缺少永久 refresh_token，已拒绝导出不完整备份。`);
+        }
+        const email = parsed.email ?? slot.email ?? slot.layout.id;
+        const exportedAt = new Date().toISOString();
+        const backupDir = join(this.primaryHome, 'credential-backups');
+        mkdirSync(backupDir, { recursive: true, mode: 0o700 });
+        const safeSlug = email.toLowerCase().replace(/[^a-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 64) || slot.layout.id;
+        const stamp = exportedAt.replace(/[:.]/g, '-').slice(0, 19);
+        const filePath = join(backupDir, `${safeSlug}-${stamp}.json`);
+        const backupPayload = {
+            target: 'gemini:antigravity',
+            userName: 'antigravity',
+            email,
+            exportedAt,
+            blobBase64: Buffer.from(parsed.rawJson, 'utf8').toString('base64'),
+        };
+        const tmp = `${filePath}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+        try {
+            writeFileSync(tmp, `${JSON.stringify(backupPayload, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+            renameSync(tmp, filePath);
+        }
+        catch (error) {
+            try {
+                unlinkSync(tmp);
+            }
+            catch { /* best-effort temp cleanup */ }
+            throw error;
+        }
+        return {
+            accountId: slot.layout.id,
+            email,
+            filePath,
+            hasRefreshToken: true,
+            exportedAt,
         };
     }
     /**
@@ -2890,9 +3138,10 @@ export class AntigravityRuntime {
             await unlockAccountKeychain(slot.layout, this.host.runCommand);
         const credOpts = this.credentialOptionsFor(slot);
         const rawSnap = await this.quota.readFor(accountId, slot.env, true, slot.layout, credOpts);
-        this.noteQuotaHealth(slot, rawSnap);
         if (rawSnap.status === 'ok')
             this.applyQuotaToSlot(slot, rawSnap);
+        else
+            this.noteQuotaHealth(slot, rawSnap);
         const rec = this.health.get(accountId);
         if (rec?.tosSuspended === true
             && rawSnap.status === 'ok'
@@ -2929,9 +3178,12 @@ export class AntigravityRuntime {
                 }
             }
         }
+        const effectiveSnap = rawSnap.status === 'ok' && slot.availableModels !== undefined && slot.availableModels.length > 0
+            ? { ...rawSnap, availableModels: slot.availableModels.map(m => ({ ...m })) }
+            : rawSnap;
         return {
             status: this.status(),
-            quota: this.decorateQuotaHealth(accountId, rawSnap),
+            quota: this.decorateQuotaHealth(accountId, effectiveSnap),
         };
     }
     /**
@@ -3037,6 +3289,8 @@ export class AntigravityRuntime {
             }
             slot.verificationRequired = false;
             slot.verificationUrl = undefined;
+            slot.authError = undefined;
+            this.health.clearAuthError(slot.layout.id);
             slot.email = email;
             slot.hasRefreshToken = hasRefreshToken;
             if (slot.process !== undefined || slot.starting !== undefined) {
@@ -3102,9 +3356,26 @@ export class AntigravityRuntime {
             await delay(150);
             email = await readAccountEmail(slot.layout, this.host.runCommand, this.platform, this.credentialOptionsFor(slot)).catch(() => undefined);
         }
-        slot.email = email;
-        this.quota.clear();
         const ok = email !== undefined || outcome.code === 0;
+        if (ok) {
+            const prevEmailLower = (session.previousEmail ?? this.health.get(slot.layout.id)?.email)?.toLowerCase();
+            const nextEmailLower = email?.toLowerCase();
+            if (prevEmailLower !== undefined && nextEmailLower !== undefined && prevEmailLower !== nextEmailLower) {
+                this.health.delete(slot.layout.id);
+            }
+            slot.verificationRequired = false;
+            slot.verificationUrl = undefined;
+            slot.authError = undefined;
+            this.health.clearAuthError(slot.layout.id);
+            slot.email = email;
+            if (slot.process !== undefined || slot.starting !== undefined) {
+                this.stopSlotProcess(slot, `Signed in account "${accountId}"; restarting ACP front.`);
+            }
+        }
+        else {
+            slot.email = email;
+        }
+        this.quota.clear();
         return {
             ok,
             email,
@@ -3138,6 +3409,24 @@ export class AntigravityRuntime {
             }
         }
     }
+}
+function orchestratorAllowedByBase(orchestratorId, baseIds, disabled) {
+    const lower = orchestratorId.toLowerCase();
+    if (disabled.some(d => d.toLowerCase() === lower))
+        return false;
+    if (lower.includes('argon') || lower.includes('g1-pro')) {
+        if (disabled.some(d => /argon/i.test(d)))
+            return false;
+        return baseIds.has('gemini-4-argon');
+    }
+    if (lower.includes('neon'))
+        return baseIds.has('gemini-4-neon');
+    if (lower === 'gemini-pro-orchestrator') {
+        if (disabled.some(d => /carbon/i.test(d)))
+            return false;
+        return baseIds.has('gemini-4-carbon');
+    }
+    return true;
 }
 function collectUsedTurnTags(messages, into) {
     const recordId = (id) => {

@@ -594,4 +594,193 @@ test('Windows concurrent multi-account mode: snapshot, import, per-session switc
   const recovered = await remote.recheckAccount({ accountId: bobId })
   assert.equal(recovered.status.accounts.find(a => a.id === bobId)?.tosSuspended, undefined)
   assert.equal(recovered.quota.tosSuspended, undefined)
+
+  // 8. Restart hydrates persisted tier + per-account entitledModels even before live probing
+  const persistedHealth = new AccountHealthStore(join(home, 'account-health.json'))
+  assert.ok((persistedHealth.get(bobId)?.lastAvailableModels?.length ?? 0) > 0)
+  const coldRestart = createRuntime(recovered.status.accounts.map(a => ({
+    id: a.id, displayName: a.label === 'This Mac' ? '' : a.label, home: a.home,
+    enabled: a.id === bobId ? false : a.enabled, env: a.env, contextWindow: a.contextWindow,
+    ...(a.system ? { system: true } : {}), visibleModels: a.visibleModels, priority: a.priority, weight: a.weight,
+  })))
+  const coldBob = coldRestart.accounts().find(a => a.id === bobId)
+  assert.equal(coldBob?.subscriptionTier, 'ULTRA')
+  assert.ok((coldBob?.entitledModels?.length ?? 0) > 0, 'disabled account retains its own persisted upstream entitledModels across restarts')
+
+  // 9. Persisted authError survives restarts and clears on fresh OK observation
+  const errHealthPath = join(home, 'auth-health-check.json')
+  const h1 = new AccountHealthStore(errHealthPath)
+  h1.recordAuthError('acc-expired', { email: 'expired@example.com', error: 'Antigravity OAuth token expired or revoked (HTTP 401)' })
+  const h2 = new AccountHealthStore(errHealthPath)
+  assert.match(h2.get('acc-expired')?.authError ?? '', /HTTP 401/)
+  h2.observeSubscription('acc-expired', { email: 'expired@example.com', tier: 'PRO', modelCount: 8 })
+  assert.equal(h2.get('acc-expired')?.authError, undefined)
+
+  // 10. ACP-discovered orchestrators survive Cloud Code quota refreshes without flapping
+  const orchHome = mkdtempSync(join(tmpdir(), 'agy-orch-merge-'))
+  const orchRt = new AntigravityRuntime({
+    platform: 'win32',
+    config: {
+      provider: 'antigravity', displayName: 'Antigravity', command: fakeBinary, home: orchHome,
+      accounts: [{ id: 'default', displayName: '', home: '', enabled: true, env: {}, contextWindow: 0, system: true, visibleModels: [], priority: 1, weight: 1 }],
+      configVersion: 2, visibleModels: [], contextWindow: 0, defaultEffort: 'high',
+      autoPatch: false, patchScript: join(orchHome, 'missing.py'), maxLiveSessions: 4, idleSessionTtlMs: 600_000,
+      parkSettleMs: 50, keepAliveMs: 5_000, longDecodeContinuations: 3, warmup: false, quotaTtlMs: 5_000,
+    },
+    spawnAcp: () => { throw new Error('unused') },
+    runCommand: async () => ({ code: 0, stdout: '', stderr: '' }),
+    readImage: async () => undefined,
+    canReadImages: () => false,
+    log: { info: () => undefined, warn: () => undefined },
+    onModelsChanged: () => undefined,
+  })
+  runtimes.push(orchRt)
+  const defaultSlot = orchRt.slots.get('default')
+  orchRt.observeSlotCatalog(defaultSlot, [{
+    id: 'model',
+    category: 'model',
+    options: [
+      { value: 'gemini-4-neon', name: 'Gemini 4 Neon' },
+      { value: 'gemini-4-argon', name: 'Gemini 4 Argon' },
+      { value: 'gemini-pro-orchestrator-neon', name: 'Orchestrator (Neon)' },
+      { value: 'gemini-pro-orchestrator-argon', name: 'Orchestrator (Argon)' },
+      { value: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' },
+    ],
+  }])
+  orchRt.applyQuotaToSlot(defaultSlot, {
+    status: 'ok',
+    updatedAt: new Date().toISOString(),
+    subscriptionTier: 'PRO',
+    subscriptionName: 'Google AI Pro',
+    argonSharedWithGemini: true,
+    groups: [],
+    availableModels: [
+      { id: 'gemini-4-neon', name: 'Gemini 4 Neon' },
+      { id: 'gemini-4-argon', name: 'Gemini 4 Argon' },
+      { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' },
+    ],
+    disabledModels: [],
+  })
+  assert.deepEqual(defaultSlot.availableModels.map(m => m.id), [
+    'gemini-4-neon',
+    'gemini-4-argon',
+    'gemini-pro-orchestrator-neon',
+    'gemini-pro-orchestrator-argon',
+    'gemini-3.8-flash',
+  ], 'eligible ACP orchestrators survive subsequent Cloud Code quota refreshes')
+
+  // If Argon is later disabled by upstream, Argon orchestrator is dropped automatically
+  orchRt.applyQuotaToSlot(defaultSlot, {
+    status: 'ok',
+    updatedAt: new Date().toISOString(),
+    subscriptionTier: 'PRO',
+    groups: [],
+    availableModels: [
+      { id: 'gemini-4-neon', name: 'Gemini 4 Neon' },
+      { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' },
+    ],
+    disabledModels: ['gemini-4-argon'],
+  })
+  assert.deepEqual(defaultSlot.availableModels.map(m => m.id), [
+    'gemini-4-neon',
+    'gemini-pro-orchestrator-neon',
+    'gemini-3.8-flash',
+  ], 'disallowed Argon orchestrator is pruned when Argon is disabled')
+})
+
+test('Safe credential export round-trips without returning secrets over RPC, import enforces 1 MiB cap, and switching/routing reject suspended, auth-expired, or opening-turn states', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'agy-export-guard-'))
+  const secretRefresh = '1//perm-export-secret-token'
+  const secretAccess = 'ya29.export-secret-access'
+  const rt = new AntigravityRuntime({
+    platform: 'win32',
+    config: {
+      provider: 'antigravity', displayName: 'Antigravity', command: fakeBinary, home,
+      accounts: [
+        { id: 'default', displayName: 'Primary', home: '', enabled: true, env: {}, contextWindow: 0, system: true, visibleModels: [], priority: 1, weight: 1 },
+        { id: 'acc-tos', displayName: 'Suspended', home: '', enabled: false, env: {}, contextWindow: 0, visibleModels: [], priority: 2, weight: 1 },
+        { id: 'acc-exp', displayName: 'Expired', home: '', enabled: false, env: {}, contextWindow: 0, visibleModels: [], priority: 3, weight: 1 },
+      ],
+      configVersion: 2, visibleModels: [], contextWindow: 0, defaultEffort: 'high',
+      autoPatch: false, patchScript: '', maxLiveSessions: 4, idleSessionTtlMs: 600_000,
+      parkSettleMs: 100, coldSwitchSettleMs: 0, keepAliveMs: 5_000, relayAfterMs: 85_000,
+      longDecodeContinuations: 3, warmup: false, quotaTtlMs: 300_000, degradeAction: 'off', engineMode: 'bridge',
+    },
+    spawnAcp: () => { throw new Error('no ACP needed') },
+    runCommand: async () => ({ code: 0, stdout: 'AGY_WINCRED_NOT_FOUND\n', stderr: '' }),
+    cloudCodeTransport: async (url) => {
+      if (url.includes('loadCodeAssist')) return { status: 200, body: { cloudaicompanionProject: 'p1', paidTier: { id: 'g1-pro-tier', name: 'Google AI Pro' } } }
+      if (url.includes('retrieveUserQuotaSummary')) return { status: 200, body: { userQuotaSummary: { quotaGroups: [] } } }
+      return { status: 200, body: { agentModelSorts: [{ groups: [{ modelIds: ['gemini-4-neon-high'] }] }], models: { 'gemini-4-neon-high': { displayName: 'Gemini 4 Neon (High)', maxTokens: 1_048_576 } } } }
+    },
+    readImage: async () => undefined,
+    canReadImages: () => false,
+    log: { info: () => undefined, warn: () => undefined },
+    onModelsChanged: () => undefined,
+  })
+  runtimes.push(rt)
+  const ctx = new Context()
+  const remote = new AntigravityRemote(ctx, { runtime: rt, settingsNs: 'dsh-llm-antigravity-acp' })
+
+  // Seed default slot with a permanent credential
+  const defaultSlot = rt.slots.get('default')
+  writeStoredCredentialFile(defaultSlot.layout.appDir, makeOAuthJson('owner@example.com', secretAccess, secretRefresh), false)
+  defaultSlot.email = 'owner@example.com'
+  defaultSlot.hasRefreshToken = true
+
+  // 1. Export writes local agy_cred.ps1 JSON and NEVER returns any token over RPC
+  const exported = await remote.exportCredential({ accountId: 'default' })
+  assert.equal(exported.accountId, 'default')
+  assert.equal(exported.email, 'owner@example.com')
+  assert.equal(exported.hasRefreshToken, true)
+  assert.ok(existsSync(exported.filePath), 'exported backup file must exist on disk')
+  const rpcJson = JSON.stringify(exported)
+  assert.equal(rpcJson.includes(secretAccess), false, 'RPC export response must never contain access_token')
+  assert.equal(rpcJson.includes(secretRefresh), false, 'RPC export response must never contain refresh_token')
+  assert.equal(rpcJson.includes('blobBase64'), false, 'RPC export response must never contain blobBase64')
+
+  // Exported file round-trips cleanly through importCredential
+  const backupDisk = JSON.parse(readFileSync(exported.filePath, 'utf8'))
+  assert.equal(backupDisk.email, 'owner@example.com')
+  assert.equal(backupDisk.target, 'gemini:antigravity')
+  const reimported = await remote.importCredential({ content: exported.filePath })
+  assert.equal(reimported.accountId, 'default')
+  assert.equal(reimported.email, 'owner@example.com')
+  assert.equal(reimported.hasRefreshToken, true)
+
+  // 2. Oversized file (> 1 MiB) is rejected before reading into memory
+  const giantFile = join(home, 'too-big.json')
+  writeFileSync(giantFile, 'x'.repeat(1_050_000), 'utf8')
+  await assert.rejects(() => remote.importCredential({ content: giantFile }), /1 MiB|过大/)
+
+  // 3. Suspended & auth-expired accounts cannot be switched into (and remain disabled) or scheduled
+  const tosSlot = rt.slots.get('acc-tos')
+  tosSlot.email = 'tos@example.com'
+  tosSlot.hasRefreshToken = true
+  rt.health.recordTosSuspended('acc-tos', { email: 'tos@example.com', error: 'ToS violation' })
+
+  const expSlot = rt.slots.get('acc-exp')
+  expSlot.email = 'exp@example.com'
+  expSlot.hasRefreshToken = true
+  expSlot.authError = 'OAuth token revoked (HTTP 401)'
+  rt.health.recordAuthError('acc-exp', { email: 'exp@example.com', error: expSlot.authError })
+
+  assert.equal(rt.slotCanServeModel('acc-tos', 'gemini-4-neon'), false)
+  assert.equal(rt.slotCanServeModel('acc-exp', 'gemini-4-neon'), false)
+  assert.equal(rt.slotCanServeModel('default', 'gemini-4-neon'), true)
+
+  await assert.rejects(() => remote.switchAccount({ accountId: 'acc-tos', sessionId: 'sess-guard' }), /ToS|停用/)
+  await assert.rejects(() => remote.switchAccount({ accountId: 'acc-exp', sessionId: 'sess-guard' }), /凭据已失效/)
+  await assert.rejects(() => remote.switchAccount({ accountId: 'acc-tos' }), /ToS|停用/)
+  await assert.rejects(() => remote.switchAccount({ accountId: 'acc-exp' }), /凭据已失效/)
+  assert.equal(rt.accounts().find(a => a.id === 'acc-tos')?.enabled, false, 'failed switch must not auto-enable ToS account')
+  assert.equal(rt.accounts().find(a => a.id === 'acc-exp')?.enabled, false, 'failed switch must not auto-enable expired account')
+
+  // 4. Switching is also blocked while a conversation is mid-open (`conv.opening === true`)
+  const openingConv = rt.createConversation('sess-opening|main', 'main', 'sess-opening')
+  openingConv.opening = true
+  await assert.rejects(() => remote.switchAccount({ accountId: 'default', sessionId: 'sess-opening' }), /正在生成回复/)
+  openingConv.opening = false
+  const okSwitch = await remote.switchAccount({ accountId: 'default', sessionId: 'sess-opening' })
+  assert.equal(okSwitch.pinnedSessions?.['sess-opening'], 'default')
 })

@@ -10,7 +10,8 @@
  * so both can depend on it without a cycle.
  * @module dsh-llm-antigravity-acp/credential
  */
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseOAuthBlob, readWindowsCredential, updateTokenJsonAfterRefresh } from './wincred.js';
 /** Prefix `agy` writes in front of the base64 JSON blob stored by `go-keyring`. */
@@ -35,15 +36,29 @@ export function writeStoredCredentialFile(appDir, rawJson, keepBackup = true) {
     mkdirSync(appDir, { recursive: true });
     if (keepBackup && existsSync(file)) {
         try {
-            copyFileSync(file, `${file}.bak`);
+            const bak = `${file}.bak`;
+            copyFileSync(file, bak);
+            try {
+                chmodSync(bak, 0o600);
+            }
+            catch { /* Windows ignores POSIX chmod */ }
         }
         catch {
             // Best-effort backup.
         }
     }
-    const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-    writeFileSync(tmp, rawJson, { encoding: 'utf8', mode: 0o600 });
-    renameSync(tmp, file);
+    const tmp = `${file}.${process.pid}.${Date.now()}.${randomBytes(4).toString('hex')}.tmp`;
+    try {
+        writeFileSync(tmp, rawJson, { encoding: 'utf8', mode: 0o600 });
+        renameSync(tmp, file);
+    }
+    catch (error) {
+        try {
+            unlinkSync(tmp);
+        }
+        catch { /* best-effort temp cleanup */ }
+        throw error;
+    }
 }
 /**
  * Write one slot's permanent OAuth credential file, and for non-system isolated
