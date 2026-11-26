@@ -12,6 +12,7 @@ import { SYSTEM_ACCOUNT_LABEL, type AccountStatus, type LoginResult, type LoginT
 import { asDegradeAction, asEffort, asEngineMode, type AccountProfile } from './config.ts'
 import type { QuotaSnapshot } from './quota.ts'
 import type { AntigravityRuntime, CredentialActionResult, CredentialExportResult, LiveOverrides, RuntimeStatus } from './runtime.ts'
+import type { UsageGroupBy, UsageRange, UsageStatsRequest, UsageStatsSnapshot } from './usage-stats.ts'
 
 /** Package name used for Typert descriptor identities. */
 export const PACKAGE_NAME = 'dsh-llm-antigravity-acp'
@@ -62,6 +63,48 @@ function parseQuotaRequest(value: unknown): QuotaRequest | undefined {
     ...typeof model === 'string' ? { model: model.trim() } : {},
     ...typeof sessionId === 'string' ? { sessionId: sessionId.trim() } : {},
   }
+}
+
+const VALID_USAGE_RANGES = new Set<string>(['today', 'week', 'month', '30d'])
+const VALID_USAGE_GROUP_BY = new Set<string>(['family', 'variant'])
+
+/** Validate an optional `usageStats` RPC request. */
+export function parseUsageStatsRequest(value: unknown): UsageStatsRequest | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'object' || Array.isArray(value)) throw new TypeError('Invalid antigravity usageStats request')
+  const record = value as Record<string, unknown>
+  const out: UsageStatsRequest = {}
+  if (record.accountId !== undefined) {
+    if (typeof record.accountId !== 'string' || record.accountId.trim().length === 0) {
+      throw new TypeError('Invalid antigravity usageStats request.accountId')
+    }
+    out.accountId = record.accountId.trim()
+  }
+  if (record.range !== undefined) {
+    if (typeof record.range !== 'string' || !VALID_USAGE_RANGES.has(record.range)) {
+      throw new TypeError('Invalid antigravity usageStats request.range')
+    }
+    out.range = record.range as UsageRange
+  }
+  if (record.groupBy !== undefined) {
+    if (typeof record.groupBy !== 'string' || !VALID_USAGE_GROUP_BY.has(record.groupBy)) {
+      throw new TypeError('Invalid antigravity usageStats request.groupBy')
+    }
+    out.groupBy = record.groupBy as UsageGroupBy
+  }
+  if (record.includeStandaloneCli !== undefined) {
+    if (typeof record.includeStandaloneCli !== 'boolean') {
+      throw new TypeError('Invalid antigravity usageStats request.includeStandaloneCli')
+    }
+    out.includeStandaloneCli = record.includeStandaloneCli
+  }
+  if (record.force !== undefined) {
+    if (typeof record.force !== 'boolean') {
+      throw new TypeError('Invalid antigravity usageStats request.force')
+    }
+    out.force = record.force
+  }
+  return out
 }
 
 /** Request of `login`: the account whose interactive sign-in should start. */
@@ -318,6 +361,10 @@ export function parseConfigureRequest(value: unknown): LiveOverrides {
     if (typeof record.realUsageCompaction !== 'boolean') throw new TypeError('Invalid antigravity realUsageCompaction')
     out.realUsageCompaction = record.realUsageCompaction
   }
+  if (record.cliOnlyQuota !== undefined) {
+    if (typeof record.cliOnlyQuota !== 'boolean') throw new TypeError('Invalid antigravity cliOnlyQuota')
+    out.cliOnlyQuota = record.cliOnlyQuota
+  }
   if (record.visibleModels !== undefined) out.visibleModels = parseVisibleModels(record.visibleModels, 'Invalid antigravity configure request.visibleModels')
   return out
 }
@@ -388,6 +435,8 @@ const importCredentialRequestCodec = codec(`${PACKAGE_NAME}#ImportCredentialRequ
 const credentialResultCodec = codec(`${PACKAGE_NAME}#CredentialActionResult`, parseObject('antigravity credential result'))
 const exportCredentialResultCodec = codec(`${PACKAGE_NAME}#CredentialExportResult`, parseObject('antigravity credential export result'))
 const recheckResultCodec = codec(`${PACKAGE_NAME}#RecheckResult`, parseObject('antigravity recheck result'))
+const usageStatsRequestCodec = codec(`${PACKAGE_NAME}#UsageStatsRequest`, parseUsageStatsRequest)
+const usageStatsCodec = codec(`${PACKAGE_NAME}#UsageStats`, parseObject('antigravity usage stats'))
 
 /** Invocation descriptors registered with the Host Gateway. */
 export const INVOCATIONS: readonly InvocationDescriptor[] = [
@@ -516,6 +565,15 @@ export const INVOCATIONS: readonly InvocationDescriptor[] = [
     invocation: { kind: 'direct' },
     parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: false, codec: loginCodec }],
     result: statusCodec,
+  },
+  {
+    id: `${PACKAGE_NAME}#${SERVICE_NAME}/usageStats`,
+    service: SERVICE_NAME,
+    namespace: SERVICE_NAME,
+    method: 'usageStats',
+    invocation: { kind: 'direct' },
+    parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: true, codec: usageStatsRequestCodec }],
+    result: usageStatsCodec,
   },
 ] as InvocationDescriptor[]
 
@@ -716,6 +774,16 @@ export class AntigravityRemote extends TypertRemoteService {
    */
   ackDowngrade(request: LoginRequest): RuntimeStatus {
     return this.options.runtime.acknowledgeDowngrade(parseLoginRequest(request).accountId)
+  }
+
+  /**
+   * Read local per-account and per-model token usage analytics plus reference
+   * API USD cost estimates without making any network requests.
+   * @param request - optional account, time range, grouping, and refresh controls.
+   * @returns aggregated usage snapshot.
+   */
+  usageStats(request?: UsageStatsRequest): UsageStatsSnapshot {
+    return this.options.runtime.usageStats(parseUsageStatsRequest(request))
   }
 
   private async persistAccountsIfCreated(result: CredentialActionResult): Promise<void> {

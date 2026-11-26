@@ -19,7 +19,7 @@ import { buildLayouts, cliEnv, loginCommand, mergeLoopbackNoProxy } from '../lib
 import { AccountHealthStore } from '../lib/account-health.js'
 import { buildHubUserAgent, createCloudCodeTransport } from '../lib/cloudcode.js'
 import { writeSlotCredentialFile } from '../lib/credential.js'
-import { QuotaReader } from '../lib/quota.js'
+import { inferArgonSharedWithGemini, parseCliModels, parseUsage, QuotaReader } from '../lib/quota.js'
 import { RouteHealth } from '../lib/route-health.js'
 import { AntigravityRuntime, normalizeLoginCodeInput } from '../lib/runtime.js'
 import {
@@ -521,6 +521,262 @@ test('D6: Windows isolated beginLogin + completeLogin surfaces stdout OAuth erro
     const mirroredPath = join(workLayout.homeDir, '.gemini', 'antigravity-cli', 'antigravity-oauth-token')
     assert.equal(existsSync(mirroredPath), true, 'isolated token must be mirrored into CLI home dir')
     assert.match(readFileSync(mirroredPath, 'utf8'), /work-new@example\.com/)
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+// ============================================================================
+// v0.5.4: Zero OAuth extraction (`cliOnlyQuota`) via official `agy` CLI
+// ============================================================================
+
+test('cliOnlyQuota: parseCliModels collapses 27 agy models variants into 11 families with xhigh, orchestrators, and maxTokens', () => {
+  const sample = [
+    'Fetching available models...',
+    'gemini-4-neon-high\tGemini 4 Neon (High)',
+    'gemini-4-neon-xhigh\tGemini 4 Neon (XHigh)',
+    'gemini-4-neon-medium\tGemini 4 Neon (Medium)',
+    'gemini-4-neon-low\tGemini 4 Neon (Low)',
+    'gemini-4-carbon-medium\tGemini 4 Carbon (Medium)',
+    'gemini-4-carbon-high\tGemini 4 Carbon (High)',
+    'gemini-4-carbon-low\tGemini 4 Carbon (Low)',
+    'gemini-4-argon-medium\tGemini 4 Argon (Medium)',
+    'gemini-4-argon-high\tGemini 4 Argon (High)',
+    'gemini-4-argon-low\tGemini 4 Argon (Low)',
+    'gemini-4-hydrogen-high\tGemini 4 Hydrogen (High)',
+    'gemini-4-hydrogen-xhigh\tGemini 4 Hydrogen (XHigh)',
+    'gemini-4-hydrogen-medium\tGemini 4 Hydrogen (Medium)',
+    'gemini-4-hydrogen-low\tGemini 4 Hydrogen (Low)',
+    'gemini-pro-orchestrator-neon\tOrchestrator (Neon)',
+    'gemini-pro-orchestrator\tOrchestrator (Carbon)',
+    'gemini-pro-orchestrator-argon\tOrchestrator (Argon)',
+    'gemini-3.8-flash-high\tGemini 3.8 Flash (High)',
+    'gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)',
+    'gemini-3.8-flash-low\tGemini 3.8 Flash (Low)',
+    'claude-opus-5-5-low\tClaude Opus 5.5 (Low)',
+    'claude-opus-5-5-medium\tClaude Opus 5.5 (Medium)',
+    'claude-opus-5-5-high\tClaude Opus 5.5 (High)',
+    'claude-sonnet-5-5-low\tClaude Sonnet 5.5 (Low)',
+    'claude-sonnet-5-5-medium\tClaude Sonnet 5.5 (Medium)',
+    'claude-sonnet-5-5-high\tClaude Sonnet 5.5 (High)',
+    'gpt-oss-120b-medium\tGPT-OSS 120B (Medium)',
+  ].join('\n')
+
+  const parsed = parseCliModels(sample)
+  assert.deepEqual(parsed.models.map(m => m.id), [
+    'gemini-4-neon',
+    'gemini-4-carbon',
+    'gemini-4-argon',
+    'gemini-4-hydrogen',
+    'gemini-pro-orchestrator-neon',
+    'gemini-pro-orchestrator',
+    'gemini-pro-orchestrator-argon',
+    'gemini-3.8-flash',
+    'claude-opus-5-5',
+    'claude-sonnet-5-5',
+    'gpt-oss-120b-medium',
+  ])
+  assert.equal(parsed.models.find(m => m.id === 'gemini-4-neon')?.name, 'Gemini 4 Neon')
+  assert.equal(parsed.models.find(m => m.id === 'gemini-pro-orchestrator-neon')?.name, 'Orchestrator (Neon)')
+  assert.equal(parsed.models.find(m => m.id === 'gpt-oss-120b-medium')?.name, 'GPT-OSS 120B (Medium)')
+  assert.deepEqual(parsed.effortsByModel['gemini-4-neon'], ['low', 'medium', 'high', 'xhigh'])
+  assert.deepEqual(parsed.effortsByModel['gemini-4-hydrogen'], ['low', 'medium', 'high', 'xhigh'])
+  assert.deepEqual(parsed.effortsByModel['gemini-4-argon'], ['low', 'medium', 'high'])
+  assert.deepEqual(parsed.effortsByModel['claude-opus-5-5'], ['low', 'medium', 'high'])
+  assert.deepEqual(parsed.effortsByModel['gpt-oss-120b-medium'], [])
+  assert.deepEqual(parsed.effortsByModel['gemini-pro-orchestrator-neon'], [])
+  assert.equal(parsed.maxTokensByModel['gemini-4-neon'], 1_048_576)
+  assert.equal(parsed.maxTokensByModel['claude-opus-5-5'], 1_000_000)
+  assert.equal(parsed.maxTokensByModel['gpt-oss-120b-medium'], 131_072)
+
+  assert.equal(inferArgonSharedWithGemini([
+    { kind: 'gemini', name: 'Gemini Models', description: 'Models within this group: Gemini 4 Neon, Gemini 4 Argon', buckets: [] },
+  ]), true)
+  assert.equal(inferArgonSharedWithGemini([
+    { kind: 'gemini', name: 'Gemini', description: 'Gemini 3.8', buckets: [] },
+    { kind: 'argon', name: 'Gemini 4 Argon', description: '', buckets: [] },
+  ]), false)
+
+  // Epoch-zero reset_time normalizes to empty string, and exhausted weekly pauses 5h bucket.
+  const parsedGroups = parseUsage(JSON.stringify({
+    command: {
+      data: {
+        groups: [
+          {
+            name: 'Gemini Models',
+            description: '',
+            buckets: [
+              { id: 'gemini-weekly', name: 'Weekly Limit Remaining', window: 'weekly', remaining_fraction: 0, reset_time: '2026-12-03T00:00:00Z' },
+              { id: 'gemini-5h', name: 'Five Hour Limit Remaining', window: '5h', remaining_fraction: 1, reset_time: '1970-01-01T00:00:00Z' },
+            ],
+          },
+          {
+            name: 'Claude and GPT models',
+            description: '',
+            buckets: [
+              { id: '3p-weekly', name: 'Weekly Limit Remaining', window: 'weekly', remaining_fraction: 1, reset_time: '1970-01-01T00:00:00Z' },
+            ],
+          },
+        ],
+      },
+    },
+  }))
+  assert.equal(parsedGroups[0].buckets[1].resetTime, '')
+  assert.equal(parsedGroups[0].buckets[1].disabled, true)
+  assert.equal(parsedGroups[1].buckets[0].resetTime, '')
+})
+
+test('cliOnlyQuota: zero Cloud Code HTTP / OAuth extraction, full quota/models/Argon parity, tier preservation, and CLI error classification', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'agy-clionly-'))
+  const accounts = [
+    { id: 'default', displayName: 'Main', home: '', enabled: true, env: {}, contextWindow: 0, system: true, visibleModels: [], priority: 1, weight: 1 },
+    { id: 'acc-sub', displayName: 'Secondary', home: '', enabled: true, env: {}, contextWindow: 0, visibleModels: [], priority: 2, weight: 1 },
+  ]
+  const layouts = buildLayouts({ home, accounts })
+  writeSlotCredentialFile(layouts[0], makeTokenJson('main@example.com', 'tok-main'), false)
+  writeSlotCredentialFile(layouts[1], makeTokenJson('sub@example.com', 'tok-sub'), false)
+
+  // Seed existing PRO tier in account-health.json so pure-CLI mode preserves it
+  const health = new AccountHealthStore(join(layouts[0].geminiDir, 'account-health.json'))
+  health.observeSubscription('default', { email: 'main@example.com', tier: 'PRO', subscriptionName: 'Google AI Pro', modelCount: 11 })
+
+  const fakeAgy = join(home, 'fake-agy.exe')
+  writeFileSync(fakeAgy, 'stub', 'utf8')
+
+  let cloudCodeCalls = 0
+  const cliCalls = []
+  let subMode = 'ok'
+
+  const usageJson = (weekly, fiveH) => JSON.stringify({
+    status: 'SUCCESS',
+    command: {
+      name: 'usage',
+      data: {
+        groups: [
+          {
+            name: 'Gemini Models',
+            description: 'Models within this group: Gemini 4 Neon, Gemini 4 Argon, Orchestrator (Neon), Gemini 3.8 Flash',
+            buckets: [
+              { id: 'gemini-weekly', name: 'Weekly Limit Remaining', window: 'weekly', remaining_fraction: weekly, reset_time: '2026-12-02T01:59:13Z' },
+              { id: 'gemini-5h', name: 'Five Hour Limit Remaining', window: '5h', remaining_fraction: fiveH, reset_time: '2026-11-26T07:17:33Z' },
+            ],
+          },
+          {
+            name: 'Claude and GPT models',
+            description: 'Models within this group: Claude Opus 5.5, GPT-OSS 120B',
+            buckets: [
+              { id: '3p-weekly', name: 'Weekly Limit Remaining', window: 'weekly', remaining_fraction: 1, reset_time: '1970-01-01T00:00:00Z' },
+            ],
+          },
+        ],
+      },
+    },
+  })
+
+  const modelsTxt = [
+    'Fetching available models...',
+    'gemini-4-neon-high\tGemini 4 Neon (High)',
+    'gemini-4-neon-xhigh\tGemini 4 Neon (XHigh)',
+    'gemini-4-argon-high\tGemini 4 Argon (High)',
+    'gemini-4-argon-low\tGemini 4 Argon (Low)',
+    'gemini-pro-orchestrator-neon\tOrchestrator (Neon)',
+    'claude-opus-5-5-high\tClaude Opus 5.5 (High)',
+    'claude-opus-5-5-low\tClaude Opus 5.5 (Low)',
+    'gpt-oss-120b-medium\tGPT-OSS 120B (Medium)',
+  ].join('\n')
+
+  const runtime = new AntigravityRuntime({
+    platform: 'win32',
+    config: {
+      provider: 'antigravity', displayName: 'Antigravity', command: fakeAgy, home,
+      accounts, configVersion: 2, visibleModels: [], contextWindow: 0, defaultEffort: 'high',
+      autoPatch: false, patchScript: '', maxLiveSessions: 4, idleSessionTtlMs: 600_000,
+      parkSettleMs: 50, coldSwitchSettleMs: 0, keepAliveMs: 5_000, relayAfterMs: 85_000,
+      longDecodeContinuations: 3, warmup: false, quotaTtlMs: 300_000, degradeAction: 'truncation',
+      engineMode: 'bridge', realUsageCompaction: true, cliOnlyQuota: true,
+    },
+    spawnAcp: () => { throw new Error('ACP should not spawn during quota read') },
+    runCommand: async (argv, _timeout, env) => {
+      cliCalls.push({ argv, env: env ?? {} })
+      const isSub = env?.WSL_INTEROP === 'dsh-isolated-slot'
+      if (argv.includes('/usage')) {
+        if (isSub && subMode === 'tos') {
+          return { code: 1, stdout: '', stderr: 'This service has been disabled in this account for violation of Terms of Service.' }
+        }
+        if (isSub && subMode === 'auth') {
+          return { code: 1, stdout: '', stderr: 'Authentication required: OAuth token revoked (invalid_grant)' }
+        }
+        return { code: 0, stdout: usageJson(isSub ? 0.66 : 0.39, isSub ? 0.89 : 0.21), stderr: '' }
+      }
+      if (argv[1] === 'models') {
+        return { code: 0, stdout: modelsTxt, stderr: '' }
+      }
+      return { code: 0, stdout: 'AGY_WINCRED_NOT_FOUND\n', stderr: '' }
+    },
+    cloudCodeTransport: async () => {
+      cloudCodeCalls += 1
+      throw new Error('cloudCodeTransport MUST NOT be called when cliOnlyQuota is enabled!')
+    },
+    readImage: async () => undefined,
+    canReadImages: () => false,
+    log: { info: () => undefined, warn: () => undefined },
+    onModelsChanged: () => undefined,
+  })
+
+  try {
+    assert.equal(runtime.cliOnlyQuota(), true)
+    assert.equal(runtime.status().cliOnlyQuota, true)
+
+    // 1. Default account query uses pure `agy -p /usage` + `agy models`, ZERO Cloud Code HTTP calls
+    const mainQuota = await runtime.quotaFor('default', true)
+    assert.equal(cloudCodeCalls, 0, 'zero direct Cloud Code HTTP requests allowed in cliOnlyQuota mode')
+    assert.equal(mainQuota.status, 'ok')
+    assert.equal(mainQuota.groups[0].name, 'Gemini 4 Neon / Argon')
+    assert.equal(mainQuota.groups[0].buckets[0].remainingFraction, 0.39)
+    assert.equal(mainQuota.groups[1].name, 'Claude 5.5 / GPT')
+    assert.equal(mainQuota.groups[1].buckets[0].resetTime, '')
+    assert.equal(mainQuota.argonSharedWithGemini, true)
+    assert.equal(mainQuota.subscriptionTier, 'PRO')
+    assert.equal(mainQuota.subscriptionName, 'Google AI Pro')
+    assert.ok(mainQuota.availableModels?.some(m => m.id === 'gemini-4-argon'))
+    assert.ok(mainQuota.availableModels?.some(m => m.id === 'gemini-pro-orchestrator-neon'))
+    assert.deepEqual(mainQuota.effortsByModel?.['gemini-4-neon'], ['high', 'xhigh'])
+
+    // Preserves previously observed PRO tier from account-health.json without downgrade false alarm
+    const mainRow = runtime.accounts().find(a => a.id === 'default')
+    assert.equal(mainRow?.subscriptionTier, 'PRO')
+    assert.equal(mainRow?.subscriptionName, 'Google AI Pro')
+    assert.equal(mainRow?.downgradeAlert, undefined)
+    assert.equal(mainRow?.quotaSummary?.gemini, 0.39)
+
+    // 2. Isolated Windows secondary account uses its own WSL_INTEROP + USERPROFILE env and gets 0.66
+    const subQuota = await runtime.quotaFor('acc-sub', true)
+    assert.equal(cloudCodeCalls, 0)
+    assert.equal(subQuota.status, 'ok')
+    assert.equal(subQuota.groups[0].buckets[0].remainingFraction, 0.66)
+    const subUsageCall = cliCalls.find(c => c.argv.includes('/usage') && c.env.WSL_INTEROP === 'dsh-isolated-slot')
+    assert.ok(subUsageCall, 'secondary Windows slot must invoke agy -p /usage with isolated WSL_INTEROP')
+
+    // 3. CLI error classification: ToS suspension & auth error surfaced identically, without extra `agy models` call
+    const modelsCountBeforeErr = cliCalls.filter(c => c.argv[1] === 'models').length
+    subMode = 'tos'
+    const tosSnap = await runtime.quotaFor('acc-sub', true)
+    assert.equal(tosSnap.status, 'error')
+    assert.equal(tosSnap.tosSuspended, true)
+    assert.equal(runtime.accounts().find(a => a.id === 'acc-sub')?.tosSuspended, true)
+    assert.equal(cliCalls.filter(c => c.argv[1] === 'models').length, modelsCountBeforeErr, 'failed /usage must not spawn agy models')
+
+    subMode = 'auth'
+    // Reset ToS first via direct health clear to verify authError path
+    runtime.health.delete('acc-sub')
+    const authSnap = await runtime.quotaFor('acc-sub', true)
+    assert.equal(authSnap.status, 'error')
+    assert.match(runtime.accounts().find(a => a.id === 'acc-sub')?.authError ?? '', /Authentication required|invalid_grant/i)
+
+    // 4. Live toggle via configure({ cliOnlyQuota: false }) clears cache and updates status
+    const toggled = runtime.configure({ cliOnlyQuota: false })
+    assert.equal(toggled.cliOnlyQuota, false)
+    assert.equal(runtime.quota.peekFor('default'), undefined, 'toggling cliOnlyQuota clears stale cache')
   } finally {
     await runtime.dispose()
   }

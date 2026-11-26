@@ -47,6 +47,13 @@ export interface ReadCredentialOptions {
    * fallback never leaks the active WinCred account's quota into a backup row.
    */
   allowCliFallback?: boolean
+  /**
+   * When true, `QuotaReader` skips direct Cloud Code PA HTTP inspection
+   * (zero OAuth token extraction and zero Node/curl requests to Google's
+   * private `v1internal:*` APIs) and queries quota/models strictly through the
+   * official `agy` CLI binary (`agy -p /usage --output-format json` + `agy models`).
+   */
+  cliOnlyQuota?: boolean
 }
 
 /** Path of one account's permanent OAuth token file under its ACP app-data directory. */

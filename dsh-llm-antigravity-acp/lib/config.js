@@ -69,6 +69,7 @@ export const Config = z.object({
     degradeAction: maybeVolatile(z.union(DEGRADE_ACTIONS).default('truncation')),
     engineMode: maybeVolatile(z.union(ENGINE_MODES).default('bridge')),
     realUsageCompaction: maybeVolatile(z.boolean().default(true)),
+    cliOnlyQuota: maybeVolatile(z.boolean().default(false)),
     // The published schemastery declarations type `.volatile()` fields as plain values.
 });
 /**

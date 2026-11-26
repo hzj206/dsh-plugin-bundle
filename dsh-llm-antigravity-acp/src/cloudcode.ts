@@ -682,7 +682,7 @@ export function deriveAccountModels(
   }
 }
 
-function summarizeClaudeGptLabel(models: readonly CatalogModel[]): string {
+export function summarizeClaudeGptLabel(models: readonly CatalogModel[]): string {
   const versions = new Set<string>()
   let hasClaude = false
   let hasGpt = false
@@ -703,7 +703,7 @@ function summarizeClaudeGptLabel(models: readonly CatalogModel[]): string {
   return hasGpt ? 'GPT-OSS' : 'Claude / GPT'
 }
 
-function summarizeGeminiLabel(models: readonly CatalogModel[], includeArgon: boolean): string {
+export function summarizeGeminiLabel(models: readonly CatalogModel[], includeArgon: boolean): string {
   const hasNeon = models.some(m => m.id.toLowerCase().startsWith('gemini-4-neon'))
   const hasCarbon = models.some(m => m.id.toLowerCase().startsWith('gemini-4-carbon'))
   const hasHydrogen = models.some(m => m.id.toLowerCase().startsWith('gemini-4-hydrogen'))

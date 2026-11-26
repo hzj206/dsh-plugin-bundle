@@ -135,6 +135,12 @@ export interface Config {
    * (e.g. from historical reasoning blocks that Gemini does not replay).
    */
   realUsageCompaction: Volatile<boolean>
+  /**
+   * Query quota and entitled models strictly through the official `agy` CLI
+   * process (`agy -p /usage --output-format json` and `agy models`) without
+   * extracting OAuth tokens or calling Google Cloud Code PA directly.
+   */
+  cliOnlyQuota: Volatile<boolean>
 }
 
 function maybeVolatile<T>(schema: T): T {
@@ -179,6 +185,7 @@ export const Config: z<Config> = z.object({
   degradeAction: maybeVolatile(z.union(DEGRADE_ACTIONS).default('truncation')),
   engineMode: maybeVolatile(z.union(ENGINE_MODES).default('bridge')),
   realUsageCompaction: maybeVolatile(z.boolean().default(true)),
+  cliOnlyQuota: maybeVolatile(z.boolean().default(false)),
   // The published schemastery declarations type `.volatile()` fields as plain values.
 }) as unknown as z<Config>
 

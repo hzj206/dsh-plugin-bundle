@@ -126,6 +126,7 @@ export function apply(ctx, config) {
         degradeAction: config.degradeAction,
         engineMode: config.engineMode,
         realUsageCompaction: config.realUsageCompaction,
+        cliOnlyQuota: config.cliOnlyQuota,
         displayName: config.displayName,
         modelDisplayNames: config.modelDisplayNames,
     };

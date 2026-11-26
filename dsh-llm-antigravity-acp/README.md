@@ -2,7 +2,9 @@
 
 > **Fork 增强维护版**（基于 [lili-luo/dsh-plugin-bundle](https://github.com/lili-luo/dsh-plugin-bundle) 持续维护，遵循原仓库 MIT 协议）
 > - **DSH 安装源**：`github:hzj206/dsh-plugin-bundle#main&path:/dsh-llm-antigravity-acp`
-> - **相比上游 `0.4.0`（`0eee9ba`）已合入的核心增强（截至 `0.5.2`）**：
+> - **相比上游 `0.4.0`（`0eee9ba`）已合入的核心增强（截至 `0.5.5`）**：
+>   - **本地 Token 用量看板（周 / 月 / 分模型 / 等效 API 美元估值）**：只读解析 `agy` 自己的 SQLite 会话库（`conversations/*.db` 的 `steps.metadata` Protobuf 字节），按账号 × 日期 × 模型增量落盘到 `usage-ledger.json`；**零联网、零 OAuth 触碰、不读提示词**。设置页「Token 用量统计」卡片提供 4 宫格 KPI、每日堆叠柱状图（按模型配色 + 悬停明细）、可展开四维拆解（输入 / 缓存读取 / 输出 / 思考）的分模型排行；输入框「额度」浮窗增加 `额度 / 用量` 分段切换，聊天中随手可看本周用量与等效 API 牌价；模型显示别名同样作用于看板标签
+>   - **零 OAuth 提取（纯 `agy` 进程查额度）开关（`cliOnlyQuota`）**：开启后插件不再直接读取 OAuth 令牌或经 Node/`curl` 直连 Google 私有 `v1internal:*` 接口，所有额度与模型探测 100% 由本机官方 `agy` 进程（`agy -p /usage --output-format json` 与 `agy models`）独立发出，展示内容与多账号隔离保持一致
 >   - **Windows 真多账号并发隔离**：非默认账号通过独立 `USERPROFILE` + `WSL_INTEROP` + 独立凭据文件沙箱并发运行，互不覆写 Windows 凭据管理器，支持输入框右侧「额度」浮窗按会话一键切换 / 恢复自动调度
 >   - **安全凭据备份、导入与本地导出**：支持一键备份本机登录、导入 `agy_cred.ps1` / OAuth JSON 凭据、以及在账号编辑弹窗内一键导出 `0600` 本地备份文件（全程仅保存至本地磁盘，绝不经 RPC 或进程 `argv` 暴露 token）
 >   - **1M 上下文解锁与真实用量 80% 压缩校准**：`agy-patch.py` 适配 `agy 1.5.16+`（含 Windows 运行中二进制热替换与 Gate 3A/3B），`realUsageCompaction` 以账单真实输入 + 缓存读取校准 DSH 80% 压缩触发点，避免启发式估算偏大导致过早压缩

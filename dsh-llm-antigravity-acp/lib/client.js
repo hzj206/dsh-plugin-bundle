@@ -728,6 +728,7 @@ window.__ModuleLoader__.load({
       { id: `${PACKAGE}#${SERVICE}/exportCredential`, service: SERVICE, namespace: SERVICE, method: 'exportCredential', invocation: { kind: 'direct' }, parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: false, codec: codec('LoginRequest', anyObject) }], result: codec('CredentialExportResult', anyObject) },
       { id: `${PACKAGE}#${SERVICE}/recheckAccount`, service: SERVICE, namespace: SERVICE, method: 'recheckAccount', invocation: { kind: 'direct' }, parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: false, codec: codec('LoginRequest', anyObject) }], result: codec('RecheckResult', anyObject) },
       { id: `${PACKAGE}#${SERVICE}/ackDowngrade`, service: SERVICE, namespace: SERVICE, method: 'ackDowngrade', invocation: { kind: 'direct' }, parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: false, codec: codec('LoginRequest', anyObject) }], result: codec('Status', anyObject) },
+      { id: `${PACKAGE}#${SERVICE}/usageStats`, service: SERVICE, namespace: SERVICE, method: 'usageStats', invocation: { kind: 'direct' }, parameters: [{ name: 'request', wire: 'request', source: 'json', acceptsUndefined: true, codec: codec('UsageStatsRequest', optionalObject) }], result: codec('UsageStats', anyObject) },
     ]
 
     // A Typert call envelope is `{ ok: true, value }` or `{ ok: false, error:
@@ -781,6 +782,12 @@ window.__ModuleLoader__.load({
         exportCredential: (request) => call('exportCredential', request),
         recheckAccount: (request) => call('recheckAccount', request),
         ackDowngrade: (request) => call('ackDowngrade', request),
+        /** Local read-only token usage analytics; never leaves this machine. Resolves `null` at once when the host predates the RPC. */
+        usageStats: async (request) => {
+          const service = scope.get(`remote.${SERVICE}`)
+          if (service && typeof service.usageStats !== 'function') return null
+          return call('usageStats', request && typeof request === 'object' ? request : undefined)
+        },
       }
     }
 
@@ -1140,6 +1147,102 @@ window.__ModuleLoader__.load({
       '.dsh-agy-session-tier{padding:0 5px;border-radius:4px;font-size:10px;font-weight:600;letter-spacing:0.02em;background:color-mix(in srgb, currentColor 8%, transparent);opacity:0.82}',
       '.dsh-agy-session-tier-ultra{color:#7c3aed;background:color-mix(in srgb, #7c3aed 14%, transparent);opacity:1}',
       '.dsh-agy-session-tier-pro{color:#2563eb;background:color-mix(in srgb, #2563eb 13%, transparent);opacity:1}',
+      // ── Token usage analytics: segmented control, stacked daily bars, model list, KPI grid ──
+      '.dsh-agy-seg{display:inline-flex;align-items:center;gap:2px;padding:2px;border-radius:999px;background:color-mix(in srgb, currentColor 6%, transparent);border:0.5px solid color-mix(in srgb, currentColor 8%, transparent)}',
+      '.dsh-agy-seg-item{box-sizing:border-box;border:0;background:transparent;color:var(--dsw-alias-label-secondary, currentColor);font:inherit;font-size:11.5px;line-height:18px;padding:2px 11px;border-radius:999px;white-space:nowrap;cursor:pointer;transition:background 160ms ease,color 160ms ease,box-shadow 160ms ease,transform 160ms ease}',
+      '.dsh-agy-seg-sm .dsh-agy-seg-item{font-size:11px;line-height:16px;padding:1px 9px}',
+      '@media(hover:hover){.dsh-agy-seg-item:hover:not(.dsh-agy-seg-item-active):not(:disabled){color:var(--dsw-alias-label-primary, currentColor);background:color-mix(in srgb, currentColor 5%, transparent)}}',
+      '.dsh-agy-seg-item:active:not(:disabled){transform:scale(.96)}',
+      '.dsh-agy-seg-item:disabled{opacity:.5;cursor:default}',
+      '.dsh-agy-seg-item-active,.dsh-agy-seg-item-active:hover:not(:disabled){background:var(--dsw-alias-bg-layer-3, color-mix(in srgb, currentColor 14%, transparent));color:var(--dsw-alias-label-primary, currentColor);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.14), inset 0 0 0 0.5px color-mix(in srgb, currentColor 10%, transparent)}',
+      '.dsh-agy-seg-item:focus-visible{outline:none;box-shadow:0 0 0 2px var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #4176e6))}',
+      '.dsh-agy-usage-chart{display:flex;flex-direction:column;user-select:none}',
+      '.dsh-agy-usage-bars{display:flex;align-items:stretch;gap:4px;height:104px}',
+      '.dsh-agy-usage-chart-compact .dsh-agy-usage-bars{height:56px;gap:3px}',
+      '.dsh-agy-usage-col{position:relative;flex:1 1 0;min-width:0;display:flex;flex-direction:column;justify-content:flex-end;border-radius:5px;transition:background 140ms ease}',
+      '@media(hover:hover){.dsh-agy-usage-col:hover{background:color-mix(in srgb, currentColor 5%, transparent)}}',
+      '.dsh-agy-usage-col-out{opacity:.5}',
+      '.dsh-agy-usage-stack{display:flex;flex-direction:column;width:100%;border-radius:4px 4px 2px 2px;overflow:hidden;transform-origin:bottom;animation:dsh-agy-usage-grow 480ms cubic-bezier(.22,1,.36,1) backwards}',
+      '.dsh-agy-usage-seg{display:block;width:100%;min-height:0;flex-basis:0}',
+      '.dsh-agy-usage-seg + .dsh-agy-usage-seg{border-top:0.5px solid color-mix(in srgb, var(--dsw-alias-surface-overlay, #111) 45%, transparent)}',
+      '@keyframes dsh-agy-usage-grow{from{transform:scaleY(0);opacity:.35}to{transform:scaleY(1);opacity:1}}',
+      '.dsh-agy-usage-labels{display:flex;gap:4px;margin-top:5px}',
+      '.dsh-agy-usage-chart-compact .dsh-agy-usage-labels{gap:3px;margin-top:4px}',
+      '.dsh-agy-usage-day-label{flex:1 1 0;min-width:0;text-align:center;font-size:10px;line-height:12px;color:var(--dsw-alias-label-tertiary, currentColor);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden}',
+      '.dsh-agy-usage-day-label-today{color:var(--dsw-alias-label-primary, currentColor);font-weight:600}',
+      '.dsh-agy-usage-tip{position:absolute;left:50%;bottom:calc(100% + 6px);transform:translate(-50%, 4px);z-index:5;box-sizing:border-box;min-width:128px;max-width:220px;padding:6px 9px;border-radius:9px;background:var(--dsw-alias-surface-overlay, var(--dsw-alias-bg-overlay, Canvas));color:var(--dsw-alias-label-primary, CanvasText);border:1px solid color-mix(in srgb, currentColor 12%, transparent);box-shadow:var(--dsw-elevation-prominent, 0 8px 24px rgba(0,0,0,.2));font-size:11px;line-height:15px;white-space:normal;text-align:left;opacity:0;pointer-events:none;transition:opacity 140ms ease, transform 140ms ease}',
+      '.dsh-agy-usage-col:hover .dsh-agy-usage-tip{opacity:1;transform:translate(-50%, 0)}',
+      '.dsh-agy-usage-col-first .dsh-agy-usage-tip{left:0;transform:translate(0, 4px)}',
+      '.dsh-agy-usage-col-first:hover .dsh-agy-usage-tip{transform:translate(0, 0)}',
+      '.dsh-agy-usage-col-last .dsh-agy-usage-tip{left:auto;right:0;transform:translate(0, 4px)}',
+      '.dsh-agy-usage-col-last:hover .dsh-agy-usage-tip{transform:translate(0, 0)}',
+      '.dsh-agy-usage-tip-title{font-weight:600;margin-bottom:3px;font-variant-numeric:tabular-nums}',
+      '.dsh-agy-usage-tip-row{display:flex;align-items:center;gap:5px}',
+      '.dsh-agy-usage-tip-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.dsh-agy-usage-tip-val{font-variant-numeric:tabular-nums;opacity:.85}',
+      '.dsh-agy-usage-dot{display:inline-block;flex:0 0 auto;width:7px;height:7px;border-radius:999px}',
+      '.dsh-agy-usage-legend{display:flex;flex-wrap:wrap;gap:4px 12px;margin-top:10px}',
+      '.dsh-agy-usage-legend-item{display:inline-flex;align-items:center;gap:5px;font-size:11px;line-height:15px;color:var(--dsw-alias-label-secondary, currentColor);white-space:nowrap}',
+      '.dsh-agy-usage-models{display:flex;flex-direction:column;margin-top:8px;border-top:1px solid color-mix(in srgb, currentColor 10%, transparent);max-height:300px;overflow-y:auto}',
+      '.dsh-agy-usage-models-compact{max-height:190px;margin-top:0;border-top:0}',
+      '.dsh-agy-usage-model{border-bottom:0.5px solid color-mix(in srgb, currentColor 8%, transparent)}',
+      '.dsh-agy-usage-model:last-child{border-bottom:0}',
+      '.dsh-agy-usage-model-head{box-sizing:border-box;display:flex;align-items:center;gap:8px;width:100%;padding:6px 4px;border:0;border-radius:7px;background:transparent;color:inherit;font:inherit;font-size:12px;line-height:18px;text-align:left;cursor:pointer;transition:background 120ms ease}',
+      '@media(hover:hover){.dsh-agy-usage-model-head:hover{background:color-mix(in srgb, currentColor 5%, transparent)}}',
+      '.dsh-agy-usage-model-head:focus-visible{outline:none;box-shadow:0 0 0 2px var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #4176e6))}',
+      '.dsh-agy-usage-model-name{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}',
+      '.dsh-agy-usage-model-share{flex:1 1 28px;min-width:28px;height:4px;border-radius:999px;background:color-mix(in srgb, currentColor 8%, transparent);overflow:hidden}',
+      '.dsh-agy-usage-share-fill{display:block;height:100%;border-radius:999px;transform-origin:left;animation:dsh-agy-usage-fill 640ms cubic-bezier(.22,1,.36,1) backwards}',
+      '@keyframes dsh-agy-usage-fill{from{transform:scaleX(0)}to{transform:scaleX(1)}}',
+      '.dsh-agy-usage-model-tokens{flex:0 0 auto;min-width:54px;text-align:right;font-variant-numeric:tabular-nums;font-weight:600}',
+      '.dsh-agy-usage-model-usd{flex:0 0 auto;min-width:58px;text-align:right;font-variant-numeric:tabular-nums;opacity:.72;font-size:11px}',
+      '.dsh-agy-usage-model .dsh-agy-chevron{width:11px;height:11px;opacity:.6}',
+      '.dsh-agy-usage-detail{display:grid;grid-template-rows:0fr;transition:grid-template-rows 240ms cubic-bezier(.22,1,.36,1)}',
+      '.dsh-agy-usage-model-open .dsh-agy-usage-detail{grid-template-rows:1fr}',
+      '.dsh-agy-usage-detail-inner{min-height:0;overflow:hidden;padding:0 4px}',
+      '.dsh-agy-usage-kv{display:flex;flex-wrap:wrap;gap:3px 14px;padding:2px 4px 6px;font-size:11px;line-height:15px;color:var(--dsw-alias-label-tertiary, currentColor)}',
+      '.dsh-agy-usage-kv b{color:var(--dsw-alias-label-primary, currentColor);font-weight:600;font-variant-numeric:tabular-nums;margin-left:4px}',
+      '.dsh-agy-usage-detail-grid{display:grid;grid-template-columns:repeat(2, minmax(0, 1fr));gap:6px;padding:2px 4px 8px}',
+      '.dsh-agy-usage-detail-cell{display:flex;flex-direction:column;gap:1px;padding:6px 9px;border-radius:8px;background:color-mix(in srgb, currentColor 4%, transparent)}',
+      '.dsh-agy-usage-detail-label{font-size:10.5px;line-height:14px;color:var(--dsw-alias-label-tertiary, currentColor)}',
+      '.dsh-agy-usage-detail-value{font-size:13px;font-weight:600;font-variant-numeric:tabular-nums}',
+      '.dsh-agy-usage-detail-pct{font-size:10.5px;line-height:14px;opacity:.68;font-variant-numeric:tabular-nums}',
+      '.dsh-agy-usage-empty{padding:10px 4px;font-size:12px;opacity:.7;text-align:center}',
+      // Compact KPI block inside the composer pill's Usage tab.
+      '.dsh-agy-usage-pill{display:flex;flex-direction:column;gap:10px;min-width:0}',
+      '.dsh-agy-usage-pill-controls{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}',
+      '.dsh-agy-usage-pill-kpi{display:flex;flex-direction:column;gap:4px;padding:9px 10px;border-radius:10px;background:color-mix(in srgb, currentColor 5%, transparent);border:1px solid color-mix(in srgb, currentColor 8%, transparent)}',
+      '.dsh-agy-usage-pill-kpi-main{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}',
+      '.dsh-agy-usage-pill-label{font-size:11px;opacity:.66}',
+      '.dsh-agy-usage-pill-value{font-size:22px;font-weight:650;line-height:1.1;letter-spacing:-.02em;font-variant-numeric:tabular-nums}',
+      '.dsh-agy-usage-pill-usd{font-size:12px;font-weight:600;font-variant-numeric:tabular-nums;padding:1px 8px;border-radius:999px;background:color-mix(in srgb, #2e9e6a 14%, transparent);color:#2e9e6a}',
+      '.dsh-agy-usage-pill-sub{display:flex;flex-wrap:wrap;gap:4px 10px;font-size:11px;line-height:15px;font-variant-numeric:tabular-nums;opacity:.8}',
+      '.dsh-agy-usage-pill-badge{font-weight:600;opacity:1;color:var(--dsw-alias-state-business-primary, #4176e6)}',
+      // Settings dashboard card.
+      '.dsh-agy-usage-card{display:flex;flex-direction:column;gap:12px;padding:14px 16px;border:0.5px solid var(--dsw-alias-settings-card-stroke, color-mix(in srgb, currentColor 14%, transparent));border-radius:var(--dsw-radius-xl, 20px);background:var(--dsw-alias-settings-card-fill, var(--dsw-alias-bg-layer-2, transparent))}',
+      '.dsh-agy-usage-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}',
+      '.dsh-agy-usage-title{font-size:14px;font-weight:600;color:var(--dsw-alias-label-primary)}',
+      '.dsh-agy-usage-subtitle{font-size:11.5px;line-height:16px;color:var(--dsw-alias-label-tertiary, currentColor);margin-top:2px}',
+      '.dsh-agy-usage-controls{display:flex;align-items:center;flex-wrap:wrap;gap:8px 10px}',
+      '.dsh-agy-usage-range-label{font-size:11.5px;color:var(--dsw-alias-label-tertiary, currentColor);font-variant-numeric:tabular-nums}',
+      '.dsh-agy-usage-toggle{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:var(--dsw-alias-label-secondary, currentColor);cursor:pointer;user-select:none}',
+      '.dsh-agy-usage-toggle input{margin:0;accent-color:var(--dsw-alias-state-business-primary, #4176e6);cursor:pointer}',
+      '.dsh-agy-kpi-grid{display:grid;grid-template-columns:repeat(4, minmax(0, 1fr));gap:10px}',
+      '@media (max-width: 560px){.dsh-agy-kpi-grid{grid-template-columns:repeat(2, minmax(0, 1fr))}}',
+      '.dsh-agy-kpi{position:relative;display:flex;flex-direction:column;gap:4px;padding:11px 12px 11px 14px;border-radius:14px;background:linear-gradient(145deg, color-mix(in srgb, currentColor 6%, transparent), color-mix(in srgb, currentColor 2.5%, transparent));border:0.5px solid color-mix(in srgb, currentColor 10%, transparent);box-shadow:inset 0 1px 0 color-mix(in srgb, #fff 7%, transparent);overflow:hidden}',
+      '.dsh-agy-kpi-accent{position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--dsw-alias-state-business-primary, #4176e6);opacity:.85}',
+      '.dsh-agy-kpi-label{font-size:11.5px;line-height:16px;color:var(--dsw-alias-label-secondary, currentColor)}',
+      '.dsh-agy-kpi-value{font-size:22px;font-weight:650;line-height:1.15;letter-spacing:-.02em;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary)}',
+      '.dsh-agy-kpi-sub{font-size:11px;line-height:15px;color:var(--dsw-alias-label-tertiary, currentColor);font-variant-numeric:tabular-nums;display:flex;flex-wrap:wrap;gap:2px 8px}',
+      '.dsh-agy-kpi-sub b{color:var(--dsw-alias-label-secondary, currentColor);font-weight:600}',
+      '.dsh-agy-usage-chart-block{display:flex;flex-direction:column;gap:2px;padding:10px 12px 8px;border-radius:14px;background:color-mix(in srgb, currentColor 3.5%, transparent);border:0.5px solid color-mix(in srgb, currentColor 9%, transparent)}',
+      '.dsh-agy-usage-chart-head{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11.5px;color:var(--dsw-alias-label-secondary, currentColor);margin-bottom:8px}',
+      '.dsh-agy-usage-chart-head b{font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary)}',
+      '.dsh-agy-usage-models-block{display:flex;flex-direction:column;gap:2px;padding:4px 8px 6px;border-radius:14px;background:color-mix(in srgb, currentColor 3.5%, transparent);border:0.5px solid color-mix(in srgb, currentColor 9%, transparent)}',
+      '.dsh-agy-usage-models-title{font-size:11.5px;font-weight:600;color:var(--dsw-alias-label-secondary, currentColor);padding:8px 4px 2px}',
+      '.dsh-agy-usage-models-block .dsh-agy-usage-models{max-height:none}',
+      '.dsh-agy-usage-foot{font-size:11px;line-height:15px;color:var(--dsw-alias-label-tertiary, currentColor)}',
+      '@media (prefers-reduced-motion: reduce){.dsh-agy-usage-stack,.dsh-agy-usage-share-fill{animation:none}.dsh-agy-usage-detail{transition:none}.dsh-agy-seg-item{transition:none}}',
     ].join('\n') + '\n' + MS.CSS
     const STYLE_ID = 'antigravity-acp-rows-style'
     function ensureStyles() {
@@ -1512,6 +1615,377 @@ window.__ModuleLoader__.load({
     const proxyFrom = (env) => {
       if (env === null || typeof env !== 'object' || Array.isArray(env)) return ''
       return env.HTTPS_PROXY || env.https_proxy || env.ALL_PROXY || env.all_proxy || env.HTTP_PROXY || env.http_proxy || ''
+    }
+
+    // ── Token usage analytics (local read-only ledger; zero network) ─────────
+    /** Reference palette keyed by the host's `colorGroup`. */
+    const USAGE_COLORS = {
+      neon: '#3b82f6', hydrogen: '#06b6d4', argon: '#8b5cf6', carbon: '#64748b',
+      orchestrator: '#10b981', flash: '#eab308', claude: '#f97316', gpt: '#ec4899', other: '#a3a3a3',
+    }
+    const usageColor = (group) => USAGE_COLORS[group] || USAGE_COLORS.other
+    /** Thousands-separated integer (`1,688`). */
+    const formatInt = (n) => {
+      const v = Math.max(0, Math.round(Number(n) || 0))
+      return String(v).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+    }
+    /** USD reference estimate: `<$0.01`, `$4.20`, `$1,204`. */
+    const formatUsd = (n) => {
+      const v = Math.max(0, Number(n) || 0)
+      if (v > 0 && v < 0.01) return '<$0.01'
+      if (v < 1000) return `$${v.toFixed(2)}`
+      return `$${formatInt(v)}`
+    }
+    /** Account label for analytics chips: remark, then the localized machine label. */
+    const usageAccountLabel = (row, isWin) => {
+      if (row && row.system === true) {
+        const custom = remarkOf(row)
+        return custom && custom !== 'This Mac' ? custom : t(isWin ? 'This PC' : 'This Mac', '本机')
+      }
+      return row ? accountTitle(row) : ''
+    }
+    /**
+     * Motion is opt-in: the OS "reduce motion" preference disables the number
+     * roll-up and the CSS grow animations. A host without `matchMedia` (the UI
+     * test sandbox) paints final values immediately.
+     */
+    const prefersReducedMotion = () => typeof window === 'undefined' || typeof window.matchMedia !== 'function'
+      || window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    const EMPTY_USAGE_TOTALS = {
+      calls: 0, inputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0, thoughtTokens: 0,
+      textOutTokens: 0, totalTokens: 0, cacheHitRate: 0, estimatedUsd: 0, cacheSavingsUsd: 0,
+    }
+
+    /** Ease-out roll-up from the previous value to the next one. */
+    function useCountUp(target) {
+      const targetNum = Number.isFinite(target) ? target : 0
+      const [display, setDisplay] = React.useState(targetNum)
+      const fromRef = React.useRef(targetNum)
+      React.useEffect(() => {
+        const from = fromRef.current
+        fromRef.current = targetNum
+        if (prefersReducedMotion() || from === targetNum) {
+          setDisplay(targetNum)
+          return undefined
+        }
+        const startedAt = Date.now()
+        const duration = 560
+        let timer = null
+        const tick = () => {
+          const p = Math.min(1, Math.max(0, (Date.now() - startedAt) / duration))
+          const eased = 1 - Math.pow(1 - p, 3)
+          setDisplay(from + (targetNum - from) * eased)
+          if (p < 1) timer = setTimeout(tick, 30)
+        }
+        timer = setTimeout(tick, 30)
+        return () => { if (timer !== null) clearTimeout(timer) }
+      }, [targetNum])
+      return display
+    }
+
+    /** Segmented pill switcher with a crossfading highlight. */
+    function Segmented(props) {
+      const tablist = props.role === 'tablist'
+      return h('div', { className: `dsh-agy-seg${props.size === 'sm' ? ' dsh-agy-seg-sm' : ''}`, role: tablist ? 'tablist' : 'group', 'aria-label': props['aria-label'] },
+        ...props.items.map((item) => {
+          const active = item.value === props.value
+          return h('button', {
+            key: String(item.value),
+            type: 'button',
+            ...(tablist ? { role: 'tab' } : {}),
+            'aria-selected': active ? 'true' : 'false',
+            ...(item.title ? { title: item.title } : {}),
+            className: `dsh-agy-seg-item${active ? ' dsh-agy-seg-item-active' : ''}`,
+            disabled: props.disabled === true,
+            'data-agy-seg': `${props.name || 'seg'}:${String(item.value)}`,
+            onClick: () => { if (props.disabled !== true && !active) props.onChange(item.value) },
+          }, item.label)
+        }))
+    }
+
+    /** Stacked daily bars (one column per day, one segment per model family) with hover tips. */
+    function UsageChart(props) {
+      const daily = Array.isArray(props.daily) ? props.daily : []
+      const compact = props.compact === true
+      const animate = !prefersReducedMotion()
+      const max = daily.reduce((m, d) => Math.max(m, Number(d && d.totalTokens) || 0), 0)
+      const lastIdx = daily.length - 1
+      return h('div', {
+        className: `dsh-agy-usage-chart${compact ? ' dsh-agy-usage-chart-compact' : ''}`,
+        'data-agy-usage-chart': props.viewKey || '',
+      },
+        h('div', { className: 'dsh-agy-usage-bars' },
+          ...daily.map((d, i) => {
+            const total = Number(d && d.totalTokens) || 0
+            const heightPct = max > 0 && total > 0 ? Math.max(2.5, (total / max) * 100) : 0
+            const segs = d && Array.isArray(d.segments) ? d.segments : []
+            const edge = i === 0 ? ' dsh-agy-usage-col-first' : (i === lastIdx ? ' dsh-agy-usage-col-last' : '')
+            return h('div', {
+              key: d.day,
+              className: `dsh-agy-usage-col${d.isToday ? ' dsh-agy-usage-col-today' : ''}${d.inRange ? '' : ' dsh-agy-usage-col-out'}${edge}`,
+              'data-agy-usage-day': d.day,
+              'data-agy-usage-day-total': String(total),
+            },
+              total > 0 ? h('div', {
+                className: 'dsh-agy-usage-stack',
+                style: { height: `${heightPct}%`, ...(animate ? { animationDelay: `${Math.min(i, 30) * 22}ms` } : {}) },
+              }, ...segs.map((s) => h('span', {
+                key: s.familyId,
+                className: 'dsh-agy-usage-seg',
+                style: { flexGrow: Math.max(0, Number(s.totalTokens) || 0), background: usageColor(s.colorGroup) },
+              }))) : null,
+              h('div', { className: 'dsh-agy-usage-tip', 'data-agy-usage-tip': d.day },
+                h('div', { className: 'dsh-agy-usage-tip-title' }, `${d.day} · ${total > 0 ? tokens(total) : t('no usage', '无用量')}`),
+                ...segs.slice(0, 6).map((s) => h('div', { key: s.familyId, className: 'dsh-agy-usage-tip-row' },
+                  h('span', { className: 'dsh-agy-usage-dot', style: { background: usageColor(s.colorGroup) } }),
+                  h('span', { className: 'dsh-agy-usage-tip-name' }, s.name),
+                  h('span', { className: 'dsh-agy-usage-tip-val' }, tokens(Number(s.totalTokens) || 0))))),
+              )
+          })),
+        h('div', { className: 'dsh-agy-usage-labels' },
+          ...daily.map((d) => h('div', {
+            key: d.day,
+            className: `dsh-agy-usage-day-label${d.isToday ? ' dsh-agy-usage-day-label-today' : ''}`,
+          }, d.label))))
+    }
+
+    /** Per-model ranking with share bars; a row expands into its four token dimensions. */
+    function UsageModelList(props) {
+      const models = Array.isArray(props.models) ? props.models : []
+      const compact = props.compact === true
+      const animate = !prefersReducedMotion()
+      const [openKey, setOpenKey] = React.useState(null)
+      if (models.length === 0) {
+        return h('div', { className: 'dsh-agy-usage-empty', 'data-agy-usage-empty': 'true' }, t('No usage in this range', '该时间段内暂无用量'))
+      }
+      return h('div', { className: `dsh-agy-usage-models${compact ? ' dsh-agy-usage-models-compact' : ''}`, role: 'list' },
+        ...models.map((m, i) => {
+          const isOpen = openKey === m.key
+          const totalTokens = Number(m.totalTokens) || 0
+          const totalInput = (Number(m.inputTokens) || 0) + (Number(m.cacheReadTokens) || 0) + (Number(m.cacheWriteTokens) || 0)
+          const output = Number(m.outputTokens) || 0
+          const whole = totalInput + output
+          const sharePct = whole > 0 ? (v) => pct(v / whole) : () => '0%'
+          return h('div', {
+            key: m.key,
+            role: 'listitem',
+            className: `dsh-agy-usage-model${isOpen ? ' dsh-agy-usage-model-open' : ''}`,
+            'data-agy-usage-model': m.familyId,
+          },
+            h('button', {
+              type: 'button',
+              className: 'dsh-agy-usage-model-head',
+              'aria-expanded': isOpen,
+              'data-agy-usage-model-toggle': m.name,
+              title: `${m.name} · ${t('API list price', 'API 牌价')} ${formatUsd(m.estimatedUsd)}`,
+              onClick: () => setOpenKey(isOpen ? null : m.key),
+            },
+              h('span', { className: 'dsh-agy-usage-dot', style: { background: usageColor(m.colorGroup) } }),
+              h('span', { className: 'dsh-agy-usage-model-name' }, m.name),
+              h('span', { className: 'dsh-agy-usage-model-share', 'aria-hidden': 'true' },
+                h('span', {
+                  className: 'dsh-agy-usage-share-fill',
+                  style: {
+                    width: `${Math.round((Number(m.share) || 0) * 100)}%`,
+                    background: usageColor(m.colorGroup),
+                    ...(animate ? { animationDelay: `${Math.min(i, 12) * 40}ms` } : {}),
+                  },
+                })),
+              h('span', { className: 'dsh-agy-usage-model-tokens' }, tokens(totalTokens)),
+              compact ? null : h('span', { className: 'dsh-agy-usage-model-usd' }, formatUsd(m.estimatedUsd)),
+              chevron(isOpen)),
+            h('div', { className: 'dsh-agy-usage-detail' },
+              h('div', { className: 'dsh-agy-usage-detail-inner' },
+                h('div', { className: 'dsh-agy-usage-kv' },
+                  h('span', null, t('Calls', '调用'), h('b', null, formatInt(m.calls))),
+                  h('span', null, t('Cache hit', '缓存命中'), h('b', null, pct(Number(m.cacheHitRate) || 0))),
+                  compact ? h('span', null, t('API list price', 'API 牌价'), h('b', null, formatUsd(m.estimatedUsd))) : null,
+                  compact ? h('span', null, t('Cache saved', '缓存节省'), h('b', null, formatUsd(m.cacheSavingsUsd))) : null),
+                h('div', { className: 'dsh-agy-usage-detail-grid' },
+                  ...[
+                    [t('Input', '输入'), Number(m.inputTokens) || 0],
+                    [t('Cache read', '缓存读取'), Number(m.cacheReadTokens) || 0],
+                    [t('Output', '输出'), output],
+                    [t('Thinking', '思考'), Number(m.thoughtTokens) || 0],
+                  ].map(([label, value]) => h('div', { key: label, className: 'dsh-agy-usage-detail-cell' },
+                    h('span', { className: 'dsh-agy-usage-detail-label' }, label),
+                    h('span', { className: 'dsh-agy-usage-detail-value' }, tokens(value)),
+                    h('span', { className: 'dsh-agy-usage-detail-pct' }, t('of total ', '占比 '), sharePct(value))))),
+                compact ? null : h('div', { className: 'dsh-agy-usage-kv' },
+                  h('span', null, t('API list price', 'API 牌价'), h('b', null, formatUsd(m.estimatedUsd))),
+                  h('span', null, t('Cache saved', '缓存节省'), h('b', null, formatUsd(m.cacheSavingsUsd))),
+                  h('span', null, t('Cache write', '缓存写入'), h('b', null, tokens(Number(m.cacheWriteTokens) || 0)))))))
+        }))
+    }
+
+    /** Compact legend of the families present in the current view. */
+    function UsageLegend(props) {
+      const models = Array.isArray(props.models) ? props.models : []
+      const seen = {}
+      const items = []
+      for (const m of models) {
+        if (!m || seen[m.familyId]) continue
+        seen[m.familyId] = true
+        items.push(m)
+      }
+      if (items.length === 0) return null
+      return h('div', { className: 'dsh-agy-usage-legend', 'aria-label': t('Models', '模型') },
+        ...items.map((m) => h('span', { key: m.familyId, className: 'dsh-agy-usage-legend-item' },
+          h('span', { className: 'dsh-agy-usage-dot', style: { background: usageColor(m.colorGroup) } }),
+          m.familyName || m.name)))
+    }
+
+    /** Usage tab of the composer pill: range + account chips, KPI, mini bars, model ranking. */
+    function UsageTabPanel(props) {
+      const s = props.snapshot && typeof props.snapshot === 'object' ? props.snapshot : null
+      const totals = (s && s.totals) || EMPTY_USAGE_TOTALS
+      const total = useCountUp(totals.totalTokens)
+      const showData = s !== null && !(props.error && s.status === 'error')
+      const accountItems = Array.isArray(props.accountItems) ? props.accountItems : []
+      return h('div', { className: 'dsh-agy-usage-pill', 'data-agy-usage-range': props.range, 'data-agy-usage-account': props.accountId },
+        h('div', { className: 'dsh-agy-usage-pill-controls' },
+          h(Segmented, {
+            size: 'sm', name: 'pill-range', 'aria-label': t('Usage range', '用量时间范围'),
+            items: [
+              { value: 'today', label: t('Today', '今日') },
+              { value: 'week', label: t('Week', '本周') },
+              { value: 'month', label: t('Month', '本月') },
+            ],
+            value: props.range, onChange: props.onRange,
+          }),
+          accountItems.length > 2 ? h(Segmented, {
+            size: 'sm', name: 'pill-usage-account', 'aria-label': t('Usage account', '用量账号'),
+            items: accountItems, value: props.accountId, onChange: props.onAccount,
+          }) : null),
+        !s && props.error ? h('div', { role: 'alert', className: 'dsh-agy-quota-error' }, props.error) : null,
+        h('div', { className: 'dsh-agy-usage-pill-kpi' },
+          h('div', { className: 'dsh-agy-usage-pill-kpi-main' },
+            h('span', { className: 'dsh-agy-usage-pill-label' }, t('Total tokens', '总消耗')),
+            h('span', { className: 'dsh-agy-usage-pill-value', 'data-agy-usage-total': tokens(totals.totalTokens) }, tokens(total)),
+            h('span', {
+              className: 'dsh-agy-usage-pill-usd',
+              'data-agy-usage-usd': formatUsd(totals.estimatedUsd),
+              title: t('Equivalent official API list price (reference only)', '等效官方 API 公开牌价（仅供参考）'),
+            }, `≈ ${formatUsd(totals.estimatedUsd)}`)),
+          h('div', { className: 'dsh-agy-usage-pill-sub' },
+            h('span', { className: 'dsh-agy-usage-pill-badge', 'data-agy-usage-cache-hit': pct(totals.cacheHitRate) }, `${t('cache hit', '缓存命中')} ${pct(totals.cacheHitRate)}`),
+            h('span', null, t(`${formatInt(totals.calls)} calls`, `${formatInt(totals.calls)} 次调用`)),
+            totals.cacheSavingsUsd >= 0.01
+              ? h('span', null, t(`cache saved ${formatUsd(totals.cacheSavingsUsd)}`, `缓存节省 ${formatUsd(totals.cacheSavingsUsd)}`))
+              : null)),
+        showData ? h(UsageChart, { daily: s.daily, compact: true, viewKey: `${props.range}:${props.accountId}` }) : null,
+        showData ? h(UsageModelList, { models: s.models, compact: true }) : null,
+        props.error ? h('div', { role: 'status', className: 'dsh-agy-quota-error' }, props.error) : null)
+    }
+
+    /** Settings dashboard: KPI grid, daily stacked bars, legend, and full model ranking. */
+    function UsageDashboard(props) {
+      const client = props.client
+      // Rendered only behind the host's capability flag, so an older host never
+      // shows an empty card (and the UI sandbox's default fake stays untouched).
+      const supported = props.supported === true && client !== null && typeof client === 'object' && typeof client.usageStats === 'function'
+      const [range, setRange] = React.useState('week')
+      const [accountId, setAccountId] = React.useState('all')
+      const [groupBy, setGroupBy] = React.useState('family')
+      const [includeCli, setIncludeCli] = React.useState(false)
+      const [snapshot, setSnapshot] = React.useState(null)
+      const [error, setError] = React.useState(null)
+      const [busy, setBusy] = React.useState(false)
+      const seqRef = React.useRef(0)
+      const accountRows = Array.isArray(props.accounts) ? props.accounts.filter((a) => a && typeof a === 'object') : []
+      const isWin = props.platform === 'win32'
+      // Roll-up values are read through hooks before any early return.
+      const kpiTotal = useCountUp(snapshot && snapshot.totals ? snapshot.totals.totalTokens : 0)
+      const kpiInput = useCountUp(snapshot && snapshot.totals ? snapshot.totals.inputTokens : 0)
+      const kpiCache = useCountUp(snapshot && snapshot.totals ? snapshot.totals.cacheReadTokens : 0)
+      const kpiOutput = useCountUp(snapshot && snapshot.totals ? snapshot.totals.outputTokens : 0)
+      const accountItems = [
+        { value: 'all', label: t('All accounts', '全部账号') },
+        ...accountRows.map((a) => ({ value: a.id, label: usageAccountLabel(a, isWin) })),
+      ]
+      const refresh = React.useCallback(async (force) => {
+        if (!supported) return
+        const seq = ++seqRef.current
+        setBusy(true)
+        try {
+          const s = await client.usageStats({ accountId, range, groupBy, includeStandaloneCli: includeCli, force: force === true })
+          if (seq !== seqRef.current) return
+          setSnapshot(s && typeof s === 'object' ? s : null)
+          setError(s && s.status === 'error' ? (s.error || t('Usage is unavailable', '用量不可用')) : null)
+        } catch (e) {
+          if (seq !== seqRef.current) return
+          setError(e instanceof Error ? e.message : String(e))
+        } finally {
+          if (seq === seqRef.current) setBusy(false)
+        }
+      }, [client, supported, accountId, range, groupBy, includeCli])
+      // Read on mount and whenever the view changes; nothing polls in the background.
+      React.useEffect(() => { void refresh(false) }, [refresh, props.reloadKey])
+      if (!supported) return null
+      const s = snapshot && typeof snapshot === 'object' ? snapshot : null
+      const totals = (s && s.totals) || EMPTY_USAGE_TOTALS
+      const models = s && Array.isArray(s.models) ? s.models : []
+      const showData = s !== null && s.status !== 'error'
+      return h('section', { className: 'dsh-agy-usage-card', 'data-agy-usage-card': 'true', 'data-agy-usage-range': range, 'data-agy-usage-account': s ? s.accountId : accountId },
+        h('div', { className: 'dsh-agy-usage-head' },
+          h('div', { style: { display: 'flex', flexDirection: 'column', minWidth: 0 } },
+            h('span', { className: 'dsh-agy-usage-title' }, t('Token usage', 'Token 用量统计')),
+            h('span', { className: 'dsh-agy-usage-subtitle' },
+              t('Read-only local ledger · zero network requests · USD at official API list price', '本地只读账本 · 零联网请求 · 美元按官方 API 公开牌价估算'))),
+          h(SmallButton, {
+            className: 'dsh-agy-btn-mini',
+            disabled: busy,
+            title: t('Rescan local conversation databases', '重新扫描本地会话数据库'),
+            onClick: () => void refresh(true),
+          }, busy ? '…' : t('Refresh', '刷新'))),
+        h('div', { className: 'dsh-agy-usage-controls' },
+          h(Segmented, { name: 'dash-range', 'aria-label': t('Usage range', '用量时间范围'), items: [
+            { value: 'today', label: t('Today', '今日') },
+            { value: 'week', label: t('This week', '本周') },
+            { value: 'month', label: t('This month', '本月') },
+            { value: '30d', label: t('30 days', '近30天') },
+          ], value: range, onChange: setRange }),
+          accountRows.length > 0 ? h(Segmented, { name: 'dash-account', 'aria-label': t('Usage account', '用量账号'), items: accountItems, value: s ? s.accountId : accountId, onChange: setAccountId }) : null,
+          h(Segmented, { name: 'dash-group', 'aria-label': t('Group models', '模型分组'), items: [
+            { value: 'family', label: t('By model', '按模型') },
+            { value: 'variant', label: t('By tier', '按挡位') },
+          ], value: groupBy, onChange: setGroupBy }),
+          s && s.hasStandaloneCli === true ? h('label', { className: 'dsh-agy-usage-toggle', title: t('Include conversations of the standalone agy CLI (~/.gemini/antigravity-cli)', '并入独立 agy CLI 的历史会话（~/.gemini/antigravity-cli）') },
+            h('input', { type: 'checkbox', 'data-agy-usage-include-cli': 'true', checked: includeCli, onChange: (e) => setIncludeCli(e.target.checked === true) }),
+            t('Include standalone CLI', '含独立 CLI')) : null),
+        error ? h('div', { role: 'alert', className: 'dsh-agy-error-text' }, error) : null,
+        h('div', { className: 'dsh-agy-kpi-grid' },
+          h(KpiCard, { accent: 'var(--dsw-alias-state-business-primary, #4176e6)', label: t('Total tokens', '总消耗'), value: kpiTotal, dataKey: 'total',
+            subs: [[t('API list price', 'API 牌价'), `≈ ${formatUsd(totals.estimatedUsd)}`]] }),
+          h(KpiCard, { accent: '#3b82f6', label: t('Uncached input', '非缓存输入'), value: kpiInput, dataKey: 'input',
+            subs: [[t('Calls', '调用次数'), formatInt(totals.calls)]] }),
+          h(KpiCard, { accent: '#2e9e6a', label: t('Cache read', '缓存读取'), value: kpiCache, dataKey: 'cache',
+            subs: [[t('Hit rate', '命中率'), pct(totals.cacheHitRate)], [t('Saved', '节省'), formatUsd(totals.cacheSavingsUsd)]] }),
+          h(KpiCard, { accent: '#f97316', label: t('Output (incl. thinking)', '输出（含思考）'), value: kpiOutput, dataKey: 'output',
+            subs: [[t('Thinking', '思考'), tokens(totals.thoughtTokens)]] })),
+        h('div', { className: 'dsh-agy-usage-chart-block' },
+          h('div', { className: 'dsh-agy-usage-chart-head' },
+            h('span', null, t('Daily usage by model', '每日用量（按模型）')),
+            h('span', { className: 'dsh-agy-usage-range-label', 'data-agy-usage-range-label': 'true' }, s ? s.rangeLabel : '')),
+          showData ? h(UsageChart, { daily: s.daily, viewKey: `${range}:${s.accountId}:${includeCli}` }) : null,
+          showData ? h(UsageLegend, { models }) : null),
+        h('div', { className: 'dsh-agy-usage-models-block' },
+          h('div', { className: 'dsh-agy-usage-models-title' }, t('By model', '按模型明细')),
+          showData ? h(UsageModelList, { models }) : h('div', { className: 'dsh-agy-usage-empty' }, busy ? t('Loading…', '读取中…') : t('No usage in this range', '该时间段内暂无用量'))),
+        h('div', { className: 'dsh-agy-usage-foot' }, t(
+          'Source: this machine\'s agy conversation databases, read locally without prompts. USD figures are reference estimates at public API list prices, not subscription invoices.',
+          '数据来源：本机 agy 会话数据库（仅本地只读计数，不读取提示词）。美元为按公开 API 牌价折算的参考估值，并非订阅账单。',
+        )))
+    }
+
+    /** One glassmorphic KPI tile with a colored accent stripe and animated value. */
+    function KpiCard(props) {
+      return h('div', { className: 'dsh-agy-kpi', 'data-agy-kpi': props.dataKey },
+        h('span', { className: 'dsh-agy-kpi-accent', style: { background: props.accent }, 'aria-hidden': 'true' }),
+        h('span', { className: 'dsh-agy-kpi-label' }, props.label),
+        h('span', { className: 'dsh-agy-kpi-value' }, tokens(props.value)),
+        h('span', { className: 'dsh-agy-kpi-sub' },
+          ...(props.subs || []).map(([k, v]) => h('span', { key: k }, `${k} `, h('b', null, v)))))
     }
 
     /** Editable copy of one account, as the editor opens on it. */
@@ -2752,6 +3226,28 @@ window.__ModuleLoader__.load({
       const lastRefreshAtRef = React.useRef(0)
       const runtimeStatusRef = React.useRef(null)
       runtimeStatusRef.current = runtimeStatus
+      // Accounts and the one serving this conversation are derived before the
+      // effects so the Usage tab follows the same account as the quota view.
+      const statusAccounts = runtimeStatus && Array.isArray(runtimeStatus.accounts)
+        ? runtimeStatus.accounts.filter((a) => a && typeof a === 'object')
+        : []
+      const pinnedMap = runtimeStatus && runtimeStatus.pinnedSessions && typeof runtimeStatus.pinnedSessions === 'object'
+        ? runtimeStatus.pinnedSessions
+        : null
+      const sessionAccountsMap = runtimeStatus && runtimeStatus.sessionAccounts && typeof runtimeStatus.sessionAccounts === 'object'
+        ? runtimeStatus.sessionAccounts
+        : null
+      const pinnedAccountId = props.sessionId && pinnedMap && typeof pinnedMap[props.sessionId] === 'string'
+        ? pinnedMap[props.sessionId]
+        : null
+      const currentAccountId = (quota && typeof quota.accountId === 'string' && quota.accountId.length > 0)
+        ? quota.accountId
+        : pinnedAccountId
+          || (props.sessionId && sessionAccountsMap && typeof sessionAccountsMap[props.sessionId] === 'string' ? sessionAccountsMap[props.sessionId] : null)
+      const currentAccountRow = currentAccountId
+        ? statusAccounts.find((a) => a.id === currentAccountId) || null
+        : null
+      const isWinRuntime = runtimeStatus && runtimeStatus.platform === 'win32'
 
       const syncStatus = React.useCallback(() => {
         if (typeof props.client.statusNow !== 'function') return
@@ -2836,6 +3332,50 @@ window.__ModuleLoader__.load({
           setRechecking(false)
         }
       }, [props.client, rechecking, refresh])
+
+      // ── Usage tab: lazy, local-only token analytics ────────────────────────
+      const [tab, setTab] = React.useState('quota')
+      const [usage, setUsage] = React.useState(null)
+      const [usageError, setUsageError] = React.useState(null)
+      const [usageBusy, setUsageBusy] = React.useState(false)
+      const [usageRange, setUsageRange] = React.useState('week')
+      // `null` follows the account serving the model on screen; a string pins one.
+      const [usageAccountOverride, setUsageAccountOverride] = React.useState(null)
+      const usageSeqRef = React.useRef(0)
+      // The host advertises the analytics RPC in `status`; an older host never
+      // mounts the tab switcher at all, so the quota popover stays as it was.
+      const usageSupported = props.client !== null && typeof props.client === 'object' && typeof props.client.usageStats === 'function'
+        && !!runtimeStatus && runtimeStatus.usageStatsSupported === true
+      const usageAccountId = usageAccountOverride === null ? (currentAccountId || 'all') : usageAccountOverride
+      const refreshUsage = React.useCallback(async (force) => {
+        if (!usageSupported) return
+        const seq = ++usageSeqRef.current
+        setUsageBusy(true)
+        try {
+          const s = await props.client.usageStats({ accountId: usageAccountId, range: usageRange, groupBy: 'family', force: force === true })
+          if (seq !== usageSeqRef.current) return
+          setUsage(s && typeof s === 'object' ? s : null)
+          setUsageError(s && s.status === 'error' ? (s.error || t('Usage is unavailable', '用量不可用')) : null)
+        } catch (e) {
+          if (seq !== usageSeqRef.current) return
+          setUsageError(e instanceof Error ? e.message : String(e))
+        } finally {
+          if (seq === usageSeqRef.current) setUsageBusy(false)
+        }
+      }, [props.client, usageSupported, usageAccountId, usageRange])
+      // Only an open Usage tab reads the ledger; nothing polls usage in the background.
+      React.useEffect(() => {
+        if (!open || tab !== 'usage' || !usageSupported) return undefined
+        void refreshUsage(false)
+        return undefined
+      }, [open, tab, usageSupported, refreshUsage])
+      // A snapshot that answered another view is never painted over the new one.
+      const usageView = usage && usage.range === usageRange && usage.accountId === usageAccountId ? usage : null
+      const usageAccountItems = [
+        { value: 'all', label: t('All', '全部') },
+        ...statusAccounts.map((acc) => ({ value: acc.id, label: usageAccountLabel(acc, isWinRuntime) })),
+      ]
+      const showUsageTab = usageSupported && tab === 'usage'
 
       React.useEffect(() => {
         if (!active) { setOpen(false); return undefined }
@@ -2940,29 +3480,9 @@ window.__ModuleLoader__.load({
       const unavailable = !!(quota && view && view.entitled === false && !unknown)
       const modelFamily = quotaFamilyOf(selection.model)
       const familyShort = modelFamily === 'claude' ? 'Claude' : modelFamily === 'argon' ? 'Argon' : 'Gemini'
-      const statusAccounts = runtimeStatus && Array.isArray(runtimeStatus.accounts)
-        ? runtimeStatus.accounts.filter((a) => a && typeof a === 'object')
-        : []
-      const pinnedMap = runtimeStatus && runtimeStatus.pinnedSessions && typeof runtimeStatus.pinnedSessions === 'object'
-        ? runtimeStatus.pinnedSessions
-        : null
-      const sessionAccountsMap = runtimeStatus && runtimeStatus.sessionAccounts && typeof runtimeStatus.sessionAccounts === 'object'
-        ? runtimeStatus.sessionAccounts
-        : null
-      const pinnedAccountId = props.sessionId && pinnedMap && typeof pinnedMap[props.sessionId] === 'string'
-        ? pinnedMap[props.sessionId]
-        : null
-      const currentAccountId = (quota && typeof quota.accountId === 'string' && quota.accountId.length > 0)
-        ? quota.accountId
-        : pinnedAccountId
-          || (props.sessionId && sessionAccountsMap && typeof sessionAccountsMap[props.sessionId] === 'string' ? sessionAccountsMap[props.sessionId] : null)
-      const currentAccountRow = currentAccountId
-        ? statusAccounts.find((a) => a.id === currentAccountId) || null
-        : null
       const rawAccountLabel = quota && (quota.accountLabel || quota.accountId)
         ? String(quota.accountLabel || quota.accountId)
         : ''
-      const isWinRuntime = runtimeStatus && runtimeStatus.platform === 'win32'
       const accountText = rawAccountLabel === SYSTEM_ACCOUNT_LABEL
         ? t(isWinRuntime ? 'This PC' : 'This Mac', '本机')
         : rawAccountLabel
@@ -3087,8 +3607,8 @@ window.__ModuleLoader__.load({
             zIndex: 50,
             boxSizing: 'border-box',
             width: 'max-content',
-            minWidth: 268,
-            maxWidth: 'min(340px, calc(100vw - 24px))',
+            minWidth: showUsageTab ? 300 : 268,
+            maxWidth: showUsageTab ? 'min(372px, calc(100vw - 24px))' : 'min(340px, calc(100vw - 24px))',
             padding: '12px 14px',
             borderRadius: 12,
             background: 'var(--dsw-alias-surface-overlay, var(--dsw-alias-bg-overlay, var(--dsw-specific-menu, Canvas)))',
@@ -3103,8 +3623,34 @@ window.__ModuleLoader__.load({
           },
         },
           h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: primary ? 9 : 6 } },
-            h('span', { style: { fontWeight: 600, fontSize: 12 } }, t('Quota', '额度')),
-            h('button', {
+            usageSupported
+              ? h(Segmented, {
+                role: 'tablist', size: 'sm', name: 'pill-tab', 'aria-label': t('Popover view', '浮窗视图'),
+                items: [
+                  { value: 'quota', label: t('Quota', '额度') },
+                  { value: 'usage', label: t('Usage', '用量') },
+                ],
+                value: tab, onChange: setTab,
+              })
+              : h('span', { style: { fontWeight: 600, fontSize: 12 } }, t('Quota', '额度')),
+            showUsageTab ? h('button', {
+              type: 'button',
+              disabled: usageBusy,
+              title: t('Refresh', '刷新'),
+              onClick: () => void refreshUsage(true),
+              style: {
+                border: 'none',
+                borderRadius: 5,
+                background: 'color-mix(in srgb, currentColor 6%, transparent)',
+                color: 'inherit',
+                opacity: usageBusy ? 0.45 : 0.78,
+                font: 'inherit',
+                fontSize: 11,
+                lineHeight: '18px',
+                padding: '1px 7px',
+                cursor: usageBusy ? 'default' : 'pointer',
+              },
+            }, usageBusy ? '…' : t('Refresh', '刷新')) : h('button', {
               type: 'button',
               disabled: busy,
               title: t('Refresh', '刷新'),
@@ -3122,6 +3668,17 @@ window.__ModuleLoader__.load({
                 cursor: busy ? 'default' : 'pointer',
               },
             }, busy ? '…' : t('Refresh', '刷新'))),
+          showUsageTab
+            ? h(UsageTabPanel, {
+              snapshot: usageView,
+              error: usageError,
+              range: usageRange,
+              onRange: setUsageRange,
+              accountId: usageAccountId,
+              accountItems: usageAccountItems,
+              onAccount: setUsageAccountOverride,
+            })
+            : h('div', { style: { display: 'contents' } },
           isTosSuspended ? h('div', {
             role: 'alert',
             className: 'dsh-agy-popover-alert dsh-agy-popover-alert-danger',
@@ -3359,7 +3916,7 @@ window.__ModuleLoader__.load({
                   `本会话已自动重答 ${interceptedCount} 次`,
                 ))
               : null,
-          primary && error ? h('div', { role: 'status', style: { marginTop: 8, color: '#d9534f', fontSize: 11, whiteSpace: 'normal', opacity: 0.9 } }, error) : null)
+          primary && error ? h('div', { role: 'status', style: { marginTop: 8, color: '#d9534f', fontSize: 11, whiteSpace: 'normal', opacity: 0.9 } }, error) : null))
           : null)
     }
 
@@ -3399,6 +3956,12 @@ window.__ModuleLoader__.load({
     const compactionOptions = () => [
       { value: true, label: t('Real billed usage (recommended)', '按真实账单校准（推荐）') },
       { value: false, label: t('DSH heuristic default', 'DSH 默认字符估算') },
+    ]
+
+    /** Quota & model discovery transport: pure official `agy` CLI vs direct Cloud Code PA HTTP. */
+    const quotaQueryOptions = () => [
+      { value: true, label: t('Pure agy CLI (zero OAuth extract)', '纯 agy 进程（零 OAuth 提取）') },
+      { value: false, label: t('Cloud Code direct (with plan tier)', 'Cloud Code 直连（含套餐等级）') },
     ]
 
     /** Long-decode choices: Antigravity's control over how far one reply may run. */
@@ -3659,8 +4222,28 @@ window.__ModuleLoader__.load({
               open: openKey === 'compaction',
               onToggle: (next) => setOpenKey(next ? 'compaction' : null),
               onChange: (v) => void applyPatch({ realUsageCompaction: v }),
+            }),
+            h(ChoiceRow, {
+              label: t('Quota query', '额度查询方式'),
+              hint: t(
+                'How quota and account models are queried.\nPure agy CLI (zero OAuth extract): runs only the official `agy` binary (`agy -p /usage` & `agy models`) so the plugin never extracts OAuth tokens or calls Google private APIs directly.\nCloud Code direct: queries `daily-cloudcode-pa` directly for live Pro/Ultra/Free tier detection and downgrade alerts.',
+                '如何查询账号额度与可用模型。\n纯 agy 进程（零 OAuth 提取）：仅通过本机官方 `agy` 进程（`agy -p /usage` 与 `agy models`）查询，插件不提取 OAuth 令牌、不直连 Google 私有接口，降低风控特征并保持原有展示效果。\nCloud Code 直连（含套餐等级）：直连上游接口，可实时刷新 Pro/Ultra/Free 套餐等级与降级提醒。',
+              ),
+              options: quotaQueryOptions(),
+              value: status.cliOnlyQuota === true,
+              disabled: busy,
+              open: openKey === 'quotaQuery',
+              onToggle: (next) => setOpenKey(next ? 'quotaQuery' : null),
+              onChange: (v) => void applyPatch({ cliOnlyQuota: v }),
             }))
             : null,
+          status ? h(UsageDashboard, {
+            client: props.client,
+            supported: status.usageStatsSupported === true,
+            accounts: Array.isArray(status.accounts) ? status.accounts : [],
+            platform: status.platform,
+            reloadKey: refreshNonce,
+          }) : null,
           status ? h(DisplayAliases, { status, client: props.client, onStatus: adoptStatus }) : null,
           // Provider-level allowlist: the same block the Models page card renders.
           status ? h(MS.ModelSelectionBlock, {

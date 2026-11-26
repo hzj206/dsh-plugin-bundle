@@ -156,6 +156,7 @@ export function apply(ctx: Context, config: Config): void {
     degradeAction: config.degradeAction,
     engineMode: config.engineMode,
     realUsageCompaction: config.realUsageCompaction,
+    cliOnlyQuota: config.cliOnlyQuota,
     displayName: config.displayName,
     modelDisplayNames: config.modelDisplayNames,
   }

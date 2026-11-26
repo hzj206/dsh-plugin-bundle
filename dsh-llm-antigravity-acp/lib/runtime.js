@@ -32,6 +32,7 @@ import { SessionStore } from './session-store.js';
 import { newSlot, rebaseSlot, slotDeniesModel, slotDisablesModel } from './slots.js';
 import { answerPermission as decidePermission, boundBridgeContent, consumeToolDelta, filterToolsForEngineMode, MAX_EAGER_BRIDGE_TOOL_BYTES, resolveActiveToolSchemas, toBridgeTools, } from './tool-bridge.js';
 import { hasGenMetadata, isGemini4Flagship, isHighReasoningEffort, peekMaxGenMetadataIdx, peekMaxModelStepIdx, readGenUsageAfter, readModelStepTail, readModelStepsAfter, sessionDbPath, } from './usage-db.js';
+import { UsageLedgerStore, } from './usage-stats.js';
 import { delay, digest, KeyedMutex } from './util.js';
 import { parseImportedCredential, parseOAuthBlob, readWindowsCredential, writeWindowsCredential } from './wincred.js';
 // The tool-bridge helpers stay importable from this module for existing consumers.
@@ -73,6 +74,7 @@ export class AntigravityRuntime {
     activeAccountFile;
     sessionAccountsFile;
     health;
+    usageLedger;
     sessions;
     pool;
     slots = new Map();
@@ -118,6 +120,7 @@ export class AntigravityRuntime {
         this.activeAccountFile = join(this.primaryHome, 'active-account.json');
         this.sessionAccountsFile = join(this.primaryHome, 'session-accounts.json');
         this.health = new AccountHealthStore(join(this.primaryHome, 'account-health.json'));
+        this.usageLedger = new UsageLedgerStore(join(this.primaryHome, 'usage-ledger.json'), { platform: this.platform });
         this.activeAccountId = this.resolveInitialActiveAccount(layouts);
         this.sessionAccountPins = readSessionAccountPins(this.sessionAccountsFile);
         for (const [sid, entry] of [...this.sessionAccountPins.entries()]) {
@@ -132,7 +135,17 @@ export class AntigravityRuntime {
             callTool: request => this.callTool(request),
             authorize: (tenantKey, bearerToken) => this.authorizeTenant(tenantKey, bearerToken),
         }, { keepAliveMs: host.config.keepAliveMs, log: message => host.log.info(message) });
-        this.quota = new QuotaReader(() => this.binary, host.runCommand, host.config.quotaTtlMs, host.cloudCodeTransport);
+        this.quota = new QuotaReader(() => {
+            if (this.binary !== undefined)
+                return this.binary;
+            try {
+                this.binary = resolveAgyBinary(this.host.config.command);
+                return this.binary;
+            }
+            catch {
+                return undefined;
+            }
+        }, host.runCommand, host.config.quotaTtlMs, host.cloudCodeTransport);
         void this.refreshAccountEmails();
         this.sweeper = setInterval(() => this.sweep(), 60_000);
         this.sweeper.unref?.();
@@ -155,8 +168,10 @@ export class AntigravityRuntime {
      * concurrent multi-account execution on Windows.
      */
     credentialOptionsFor(slot) {
-        if (this.platform !== 'win32')
-            return {};
+        const cliOnly = this.cliOnlyQuota();
+        if (this.platform !== 'win32') {
+            return cliOnly ? { cliOnlyQuota: true } : {};
+        }
         return {
             useWindowsCredentialManager: slot.layout.system,
             syncFileOnWinCredRead: slot.layout.system,
@@ -164,6 +179,7 @@ export class AntigravityRuntime {
             // `WSL_INTEROP=dsh-isolated-slot`, so CLI fallback stays strictly isolated
             // to that slot and never reads Windows Credential Manager.
             allowCliFallback: true,
+            ...(cliOnly ? { cliOnlyQuota: true } : {}),
         };
     }
     /**
@@ -306,6 +322,18 @@ export class AntigravityRuntime {
         const configured = current(this.host.config.realUsageCompaction);
         return typeof configured === 'boolean' ? configured : true;
     }
+    /**
+     * Whether quota and account model discovery run strictly through the official
+     * `agy` CLI process (`agy -p /usage` & `agy models`) with zero OAuth token
+     * extraction or direct Cloud Code PA HTTP calls.
+     * @returns true when CLI-only quota mode is active.
+     */
+    cliOnlyQuota() {
+        if (this.overrides.cliOnlyQuota !== undefined)
+            return this.overrides.cliOnlyQuota;
+        const configured = current(this.host.config.cliOnlyQuota);
+        return typeof configured === 'boolean' ? configured : false;
+    }
     /** Provider-level model allowlist; empty offers every advertised family. */
     providerVisible() {
         return accountVisibleModels(this.overrides.visibleModels ?? current(this.host.config.visibleModels));
@@ -348,6 +376,7 @@ export class AntigravityRuntime {
      */
     configure(patch) {
         const prevEngineMode = this.engineMode();
+        const prevCliOnlyQuota = this.cliOnlyQuota();
         const next = { ...patch };
         if (next.visibleModels !== undefined)
             next.visibleModels = accountVisibleModels(next.visibleModels);
@@ -362,6 +391,8 @@ export class AntigravityRuntime {
         const nextEngineMode = this.engineMode();
         if (prevEngineMode !== nextEngineMode)
             this.applyEngineModeChange(nextEngineMode);
+        if (prevCliOnlyQuota !== this.cliOnlyQuota())
+            this.quota.clear();
         if (next.accounts !== undefined)
             this.applyAccounts();
         if (next.visibleModels !== undefined)
@@ -464,7 +495,7 @@ export class AntigravityRuntime {
         }
         else if (snapshot.tosSuspended !== true
             && typeof snapshot.error === 'string'
-            && /HTTP 401|expired|revoked|unauthorized|invalid_grant/i.test(snapshot.error)) {
+            && /HTTP 401|\b401\b|expired|revoked|unauthorized|invalid_grant|authentication required|not logged in/i.test(snapshot.error)) {
             slot.authError = snapshot.error;
             this.health?.recordAuthError(slot.layout.id, {
                 ...(slot.email !== undefined ? { email: slot.email } : {}),
@@ -478,22 +509,36 @@ export class AntigravityRuntime {
                 ...(snapshot.tosAppealUrl !== undefined ? { appealUrl: snapshot.tosAppealUrl } : {}),
             });
         }
-        else if (snapshot.status === 'ok' && snapshot.subscriptionTier !== undefined) {
-            const models = observedModels !== undefined && observedModels.length > 0
-                ? observedModels
-                : (snapshot.availableModels !== undefined && snapshot.availableModels.length > 0
-                    ? snapshot.availableModels
-                    : slot.availableModels);
-            const modelCount = models?.length ?? 0;
-            this.health?.observeSubscription(slot.layout.id, {
-                ...(slot.email !== undefined ? { email: slot.email } : {}),
-                tier: snapshot.subscriptionTier,
-                ...(snapshot.subscriptionName !== undefined ? { subscriptionName: snapshot.subscriptionName } : {}),
-                modelCount,
-                ...(models !== undefined && models.length > 0 ? { availableModels: models } : {}),
-                ...(snapshot.disabledModels !== undefined ? { disabledModels: snapshot.disabledModels } : {}),
-                ...(snapshot.argonSharedWithGemini !== undefined ? { argonSharedWithGemini: snapshot.argonSharedWithGemini } : {}),
-            });
+        else if (snapshot.status === 'ok') {
+            const existingRec = this.health?.get(slot.layout.id);
+            const sameIdentity = existingRec !== undefined && (slot.email === undefined
+                || existingRec.email === undefined
+                || slot.email.trim().toLowerCase() === existingRec.email.trim().toLowerCase());
+            const knownTier = snapshot.subscriptionTier
+                ?? slot.subscriptionTier
+                ?? (sameIdentity && (existingRec?.lastTier === 'ULTRA' || existingRec?.lastTier === 'PRO' || existingRec?.lastTier === 'FREE' || existingRec?.lastTier === 'ENTERPRISE')
+                    ? existingRec.lastTier
+                    : undefined);
+            if (knownTier !== undefined) {
+                const models = observedModels !== undefined && observedModels.length > 0
+                    ? observedModels
+                    : (snapshot.availableModels !== undefined && snapshot.availableModels.length > 0
+                        ? snapshot.availableModels
+                        : slot.availableModels);
+                const modelCount = models?.length ?? 0;
+                const subName = snapshot.subscriptionName
+                    ?? slot.subscriptionName
+                    ?? (sameIdentity ? existingRec?.lastSubscriptionName : undefined);
+                this.health?.observeSubscription(slot.layout.id, {
+                    ...(slot.email !== undefined ? { email: slot.email } : {}),
+                    tier: knownTier,
+                    ...(subName !== undefined ? { subscriptionName: subName } : {}),
+                    modelCount,
+                    ...(models !== undefined && models.length > 0 ? { availableModels: models } : {}),
+                    ...(snapshot.disabledModels !== undefined ? { disabledModels: snapshot.disabledModels } : {}),
+                    ...(snapshot.argonSharedWithGemini !== undefined ? { argonSharedWithGemini: snapshot.argonSharedWithGemini } : {}),
+                });
+            }
         }
     }
     mergeSlotOrchestrators(slot, baseModels, disabledModels) {
@@ -534,6 +579,18 @@ export class AntigravityRuntime {
             slot.subscriptionTier = snapshot.subscriptionTier;
         if (snapshot.subscriptionName !== undefined)
             slot.subscriptionName = snapshot.subscriptionName;
+        if (slot.subscriptionTier === undefined) {
+            const existingRec = this.health?.get(slot.layout.id);
+            const sameIdentity = existingRec !== undefined && (slot.email === undefined
+                || existingRec.email === undefined
+                || slot.email.trim().toLowerCase() === existingRec.email.trim().toLowerCase());
+            if (sameIdentity && (existingRec?.lastTier === 'ULTRA' || existingRec?.lastTier === 'PRO' || existingRec?.lastTier === 'FREE' || existingRec?.lastTier === 'ENTERPRISE')) {
+                slot.subscriptionTier = existingRec.lastTier;
+                if (slot.subscriptionName === undefined && existingRec.lastSubscriptionName !== undefined) {
+                    slot.subscriptionName = existingRec.lastSubscriptionName;
+                }
+            }
+        }
         if (snapshot.disabledModels !== undefined)
             slot.disabledModels = [...snapshot.disabledModels];
         if (snapshot.argonSharedWithGemini !== undefined)
@@ -697,6 +754,8 @@ export class AntigravityRuntime {
             degradeAction: this.degradeAction(),
             engineMode: this.engineMode(),
             realUsageCompaction: this.realUsageCompaction(),
+            cliOnlyQuota: this.cliOnlyQuota(),
+            usageStatsSupported: true,
             models: this.catalog.list().map(m => ({ ...m })),
             availableModels: this.catalog.availableModels().map(m => ({ ...m })),
             visibleModels: this.providerVisible(),
@@ -779,8 +838,10 @@ export class AntigravityRuntime {
             this.applyQuotaToSlot(slot, snapshot);
         else
             this.noteQuotaHealth(slot, snapshot);
-        const effective = snapshot.status === 'ok' && slot.availableModels !== undefined && slot.availableModels.length > 0
-            ? { ...snapshot, availableModels: slot.availableModels.map(m => ({ ...m })) }
+        const effective = snapshot.status === 'ok'
+            ? this.withSlotEntitlements(id, slot.availableModels !== undefined && slot.availableModels.length > 0
+                ? { ...snapshot, availableModels: slot.availableModels.map(m => ({ ...m })) }
+                : snapshot)
             : snapshot;
         return this.decorateQuotaHealth(id, effective);
     }
@@ -832,6 +893,26 @@ export class AntigravityRuntime {
             model,
             focus: resolveModelQuota(snapshot, model),
         };
+    }
+    /**
+     * Local-first, read-only per-account and per-model token usage analytics
+     * plus equivalent official API USD reference estimates. Reads only local
+     * SQLite conversation databases and an incremental ledger; never makes
+     * external network requests or reads OAuth credentials.
+     * @param request - optional account, time range, grouping, and refresh controls.
+     * @returns aggregated usage analytics snapshot.
+     */
+    usageStats(request) {
+        const sources = [...this.slots.values()].map(slot => ({
+            accountId: slot.layout.id,
+            label: this.accountLabel(slot.layout),
+            ...(slot.email !== undefined ? { email: slot.email } : {}),
+            system: slot.layout.system,
+            appDir: slot.layout.appDir,
+            geminiDir: slot.layout.geminiDir,
+            homeDir: slot.layout.homeDir,
+        }));
+        return this.usageLedger.query(sources, request, this.modelDisplayNames());
     }
     /**
      * Fold the entitlements the ACP front already reported into a CLI-read
@@ -3178,8 +3259,10 @@ export class AntigravityRuntime {
                 }
             }
         }
-        const effectiveSnap = rawSnap.status === 'ok' && slot.availableModels !== undefined && slot.availableModels.length > 0
-            ? { ...rawSnap, availableModels: slot.availableModels.map(m => ({ ...m })) }
+        const effectiveSnap = rawSnap.status === 'ok'
+            ? this.withSlotEntitlements(accountId, slot.availableModels !== undefined && slot.availableModels.length > 0
+                ? { ...rawSnap, availableModels: slot.availableModels.map(m => ({ ...m })) }
+                : rawSnap)
             : rawSnap;
         return {
             status: this.status(),

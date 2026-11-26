@@ -571,7 +571,7 @@ export function deriveAccountModels(body, summaryGroups, tier) {
         argonEligible,
     };
 }
-function summarizeClaudeGptLabel(models) {
+export function summarizeClaudeGptLabel(models) {
     const versions = new Set();
     let hasClaude = false;
     let hasGpt = false;
@@ -595,7 +595,7 @@ function summarizeClaudeGptLabel(models) {
         return claudePart;
     return hasGpt ? 'GPT-OSS' : 'Claude / GPT';
 }
-function summarizeGeminiLabel(models, includeArgon) {
+export function summarizeGeminiLabel(models, includeArgon) {
     const hasNeon = models.some(m => m.id.toLowerCase().startsWith('gemini-4-neon'));
     const hasCarbon = models.some(m => m.id.toLowerCase().startsWith('gemini-4-carbon'));
     const hasHydrogen = models.some(m => m.id.toLowerCase().startsWith('gemini-4-hydrogen'));

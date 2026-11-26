@@ -12,7 +12,9 @@
  * @module dsh-llm-antigravity-acp/quota
  */
 import { SYSTEM_ACCOUNT_ID } from './accounts.js';
-import { inspectCloudCodeAccount, TosSuspendedError, VerificationRequiredError, } from './cloudcode.js';
+import { inspectCloudCodeAccount, parseTosSuspended, parseVerificationRequired, summarizeClaudeGptLabel, summarizeGeminiLabel, TosSuspendedError, VerificationRequiredError, } from './cloudcode.js';
+import { EFFORTS } from './config.js';
+import { GPT_OSS_CONTEXT_WINDOW, UNLOCKED_CONTEXT_WINDOW } from './preflight.js';
 /**
  * Whether one window is the weekly (7-day) bucket. Upstream either names the
  * window `weekly` or encodes it in the bucket id (`gemini-weekly`, `3p-7d`), so
@@ -23,6 +25,102 @@ import { inspectCloudCodeAccount, TosSuspendedError, VerificationRequiredError, 
  */
 export function isWeeklyBucket(bucket) {
     return /week|7d/i.test(`${bucket.window} ${bucket.id}`);
+}
+const CLI_EFFORT_SUFFIX = /^(.+)-(xhigh|low|medium|high)$/;
+function stripCliEffortLabel(displayName) {
+    return displayName.replace(/\s*\((XHigh|Low|Medium|High)\)\s*$/i, '').trim();
+}
+function defaultMaxTokensForCliModel(id) {
+    const lower = id.toLowerCase();
+    if (lower.startsWith('gpt-oss'))
+        return GPT_OSS_CONTEXT_WINDOW;
+    if (lower.startsWith('claude-') && lower.includes('5-5'))
+        return 1_000_000;
+    return UNLOCKED_CONTEXT_WINDOW;
+}
+/**
+ * Parse `agy models` tab-separated output (`<id>\t<Display Name>`) into collapsed
+ * model families, per-family offered efforts, and default context window ceilings.
+ * Keeps standalone fixed variants (e.g. `gpt-oss-120b-medium`) and orchestrators
+ * intact while collapsing multi-effort families (`gemini-4-neon-{low,medium,high,xhigh}`).
+ * @param stdout - raw stdout of `agy models`.
+ * @returns normalized model inventory.
+ */
+export function parseCliModels(stdout) {
+    const entries = [];
+    const seenRaw = new Set();
+    for (const rawLine of stdout.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (line.length === 0)
+            continue;
+        const tab = line.indexOf('\t');
+        if (tab <= 0)
+            continue;
+        const id = line.slice(0, tab).trim();
+        const name = line.slice(tab + 1).trim();
+        if (!/^[a-z0-9][a-z0-9._-]*$/i.test(id) || seenRaw.has(id))
+            continue;
+        seenRaw.add(id);
+        entries.push({ id, name: name.length > 0 ? name : id });
+    }
+    const stemEfforts = new Map();
+    for (const entry of entries) {
+        const match = CLI_EFFORT_SUFFIX.exec(entry.id);
+        if (match === null)
+            continue;
+        const stem = match[1];
+        const effort = match[2];
+        const list = stemEfforts.get(stem) ?? [];
+        if (!list.includes(effort))
+            list.push(effort);
+        stemEfforts.set(stem, list);
+    }
+    const models = [];
+    const effortsByModel = {};
+    const maxTokensByModel = {};
+    const seenFamilies = new Set();
+    for (const entry of entries) {
+        const match = CLI_EFFORT_SUFFIX.exec(entry.id);
+        const stem = match?.[1];
+        const variants = stem !== undefined ? stemEfforts.get(stem) : undefined;
+        const collapsed = stem !== undefined && variants !== undefined && variants.length >= 2;
+        const familyId = collapsed ? stem : entry.id;
+        if (seenFamilies.has(familyId))
+            continue;
+        seenFamilies.add(familyId);
+        const displayName = collapsed ? (stripCliEffortLabel(entry.name) || familyId) : entry.name;
+        models.push({ id: familyId, name: displayName });
+        effortsByModel[familyId] = collapsed ? EFFORTS.filter(e => variants.includes(e)) : [];
+        maxTokensByModel[familyId] = defaultMaxTokensForCliModel(familyId);
+    }
+    return { models, effortsByModel, maxTokensByModel };
+}
+/**
+ * Infer whether Argon shares the Gemini quota pool directly from `agy -p /usage`
+ * group descriptions, so pure-CLI quota mode retains accurate Argon entitlement
+ * without calling Cloud Code PA directly.
+ * @param groups - parsed `/usage` groups.
+ * @returns `true` if Gemini's description lists Argon, `false` if Argon has its own group, else `undefined`.
+ */
+export function inferArgonSharedWithGemini(groups) {
+    if (groups.some(g => g.kind === 'argon'))
+        return false;
+    const gemini = groups.find(g => g.kind === 'gemini');
+    if (gemini !== undefined && /\bargon\b/i.test(gemini.description))
+        return true;
+    return undefined;
+}
+function normalizeUsageResetTime(raw) {
+    const value = String(raw ?? '').trim();
+    if (value.length === 0)
+        return '';
+    const ms = Date.parse(value);
+    // `agy -p /usage` serializes unset protobuf Timestamps as Unix epoch zero
+    // (`1970-01-01T00:00:00Z`), whereas Cloud Code direct returns `""`. Normalize
+    // epoch zero to empty so untouched buckets do not render as "Resets now".
+    if (Number.isFinite(ms) && ms <= 0)
+        return '';
+    return value;
 }
 /**
  * Parse `agy -p /usage --output-format json` output.
@@ -41,23 +139,55 @@ export function parseUsage(stdout) {
         const kind = lower.includes('argon')
             ? 'argon'
             : (lower.includes('claude') || lower.includes('gpt') || lower.includes('3p') ? 'claude' : 'gemini');
+        const rawBuckets = (Array.isArray(group.buckets) ? group.buckets : []).map((b) => {
+            const bucket = b;
+            return {
+                id: String(bucket.id ?? ''),
+                name: String(bucket.name ?? ''),
+                window: String(bucket.window ?? ''),
+                remainingFraction: typeof bucket.remaining_fraction === 'number' ? bucket.remaining_fraction : 0,
+                resetTime: normalizeUsageResetTime(bucket.reset_time),
+                ...(bucket.disabled === true ? { disabled: true } : {}),
+            };
+        });
+        const weeklyExhausted = rawBuckets.some(b => isWeeklyBucket(b) && b.remainingFraction <= 0.005 && !b.disabled);
+        const buckets = weeklyExhausted
+            ? rawBuckets.map(b => (/5h|hour/i.test(`${b.window} ${b.id}`) ? { ...b, disabled: true } : b))
+            : rawBuckets;
         return {
             kind,
             name,
             description: String(group.description ?? ''),
-            buckets: (Array.isArray(group.buckets) ? group.buckets : []).map((b) => {
-                const bucket = b;
-                return {
-                    id: String(bucket.id ?? ''),
-                    name: String(bucket.name ?? ''),
-                    window: String(bucket.window ?? ''),
-                    remainingFraction: typeof bucket.remaining_fraction === 'number' ? bucket.remaining_fraction : 0,
-                    resetTime: String(bucket.reset_time ?? ''),
-                    ...(bucket.disabled === true ? { disabled: true } : {}),
-                };
-            }),
+            buckets,
         };
     });
+}
+function normalizeCliQuotaGroups(groups, models, argonSharedWithGemini) {
+    if (models === undefined || models.length === 0)
+        return [...groups];
+    const hasClaudeOrGpt = models.some((m) => {
+        const lower = m.id.toLowerCase();
+        return lower.startsWith('claude') || lower.startsWith('gpt');
+    });
+    const out = [];
+    for (const group of groups) {
+        if (group.kind === 'claude') {
+            if (!hasClaudeOrGpt)
+                continue;
+            out.push({ ...group, name: summarizeClaudeGptLabel(models) });
+            continue;
+        }
+        if (group.kind === 'gemini') {
+            out.push({ ...group, name: summarizeGeminiLabel(models, argonSharedWithGemini === true) });
+            continue;
+        }
+        if (group.kind === 'argon') {
+            out.push({ ...group, name: 'Gemini 4 Argon' });
+            continue;
+        }
+        out.push({ ...group });
+    }
+    return out;
 }
 /**
  * Pick the quota group that serves one model family.
@@ -226,7 +356,7 @@ export class QuotaReader {
         const running = this.inflight.get(accountId);
         if (!force && running !== undefined)
             return running;
-        const pending = this.fetch(accountId, env, layout, credentialOptions).finally(() => {
+        const pending = this.fetch(accountId, env, layout, credentialOptions, force).finally(() => {
             if (this.inflight.get(accountId) === pending)
                 this.inflight.delete(accountId);
         });
@@ -258,9 +388,10 @@ export class QuotaReader {
         }
         return snapshot;
     }
-    async fetch(accountId, env, layout, credentialOptions) {
+    async fetch(accountId, env, layout, credentialOptions, force = false) {
+        const cliOnly = credentialOptions?.cliOnlyQuota === true;
         const allowCliFallback = credentialOptions?.allowCliFallback !== false;
-        if (layout !== undefined) {
+        if (!cliOnly && layout !== undefined) {
             try {
                 const inspected = await inspectCloudCodeAccount({
                     layout,
@@ -334,29 +465,120 @@ export class QuotaReader {
         const binary = this.binary();
         if (binary === undefined)
             return { status: 'error', updatedAt: new Date().toISOString(), groups: [], error: 'agy binary not resolved yet' };
+        const previous = this.cached.get(accountId)?.snapshot;
+        const shouldFetchModels = cliOnly && (force || previous?.availableModels === undefined || previous.availableModels.length === 0);
         try {
+            // Run `/usage` first and `models` sequentially afterwards so two `agy`
+            // processes never race to refresh/write the same OAuth credential file,
+            // and error paths (ToS/auth/offline) skip the extra `models` spawn.
             const result = await this.run([binary, '-p', '/usage', '--output-format', 'json'], 45_000, env);
-            const previous = this.cached.get(accountId)?.snapshot;
+            const combinedErrorText = () => {
+                const parts = [];
+                if (result.stderr.trim().length > 0)
+                    parts.push(result.stderr.trim());
+                if (result.stdout.trim().length > 0)
+                    parts.push(result.stdout.trim());
+                return parts.join('\n');
+            };
+            if (result.code !== 0) {
+                const rawErr = combinedErrorText() || `agy /usage exited with code ${String(result.code)}`;
+                const tos = parseTosSuspended(rawErr);
+                if (tos !== undefined) {
+                    return this.recordError(accountId, {
+                        status: 'error',
+                        updatedAt: new Date().toISOString(),
+                        groups: previous?.groups ?? [],
+                        error: tos.message,
+                        tosSuspended: true,
+                        tosAppealUrl: tos.appealUrl,
+                    }, true);
+                }
+                const verify = parseVerificationRequired(rawErr);
+                if (verify !== undefined) {
+                    return this.recordError(accountId, {
+                        status: 'error',
+                        updatedAt: new Date().toISOString(),
+                        groups: previous?.groups ?? [],
+                        error: verify.message,
+                        verificationRequired: true,
+                        ...(verify.verificationUrl !== undefined ? { verificationUrl: verify.verificationUrl } : {}),
+                    }, true);
+                }
+                const isAuth = /HTTP 401|\b401\b|expired|revoked|unauthorized|invalid_grant|authentication required|not logged in|please sign in/i.test(rawErr);
+                return this.recordError(accountId, {
+                    status: 'error',
+                    updatedAt: new Date().toISOString(),
+                    groups: previous?.groups ?? [],
+                    error: rawErr.slice(0, 400),
+                }, isAuth);
+            }
+            const rawGroups = parseUsage(result.stdout);
+            const modelsResult = shouldFetchModels
+                ? await this.run([binary, 'models'], 30_000, env).catch(() => undefined)
+                : undefined;
+            const parsedModels = modelsResult !== undefined && modelsResult.code === 0
+                ? parseCliModels(modelsResult.stdout)
+                : undefined;
+            const hasCliModels = parsedModels !== undefined && parsedModels.models.length > 0;
+            const effectiveModels = hasCliModels ? parsedModels.models : previous?.availableModels;
+            const argonShared = inferArgonSharedWithGemini(rawGroups) ?? previous?.argonSharedWithGemini;
+            const groups = cliOnly ? normalizeCliQuotaGroups(rawGroups, effectiveModels, argonShared) : rawGroups;
             const snapshot = {
                 status: 'ok',
                 updatedAt: new Date().toISOString(),
-                groups: parseUsage(result.stdout),
+                groups,
                 ...(previous?.subscriptionTier !== undefined ? { subscriptionTier: previous.subscriptionTier } : {}),
                 ...(previous?.subscriptionName !== undefined ? { subscriptionName: previous.subscriptionName } : {}),
-                ...(previous?.availableModels !== undefined ? { availableModels: previous.availableModels } : {}),
-                ...(previous?.disabledModels !== undefined ? { disabledModels: previous.disabledModels } : {}),
+                ...(hasCliModels
+                    ? {
+                        availableModels: parsedModels.models,
+                        effortsByModel: parsedModels.effortsByModel,
+                        maxTokensByModel: parsedModels.maxTokensByModel,
+                        disabledModels: [],
+                    }
+                    : {
+                        ...(previous?.availableModels !== undefined ? { availableModels: previous.availableModels } : {}),
+                        ...(previous?.effortsByModel !== undefined ? { effortsByModel: previous.effortsByModel } : {}),
+                        ...(previous?.maxTokensByModel !== undefined ? { maxTokensByModel: previous.maxTokensByModel } : {}),
+                        ...(previous?.disabledModels !== undefined ? { disabledModels: previous.disabledModels } : {}),
+                    }),
+                ...(argonShared !== undefined ? { argonSharedWithGemini: argonShared } : {}),
             };
             this.errorBackoff.delete(accountId);
             this.cached.set(accountId, { snapshot, at: Date.now() });
             return snapshot;
         }
         catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const tos = parseTosSuspended(message);
+            if (tos !== undefined) {
+                return this.recordError(accountId, {
+                    status: 'error',
+                    updatedAt: new Date().toISOString(),
+                    groups: previous?.groups ?? [],
+                    error: tos.message,
+                    tosSuspended: true,
+                    tosAppealUrl: tos.appealUrl,
+                }, true);
+            }
+            const verify = parseVerificationRequired(message);
+            if (verify !== undefined) {
+                return this.recordError(accountId, {
+                    status: 'error',
+                    updatedAt: new Date().toISOString(),
+                    groups: previous?.groups ?? [],
+                    error: verify.message,
+                    verificationRequired: true,
+                    ...(verify.verificationUrl !== undefined ? { verificationUrl: verify.verificationUrl } : {}),
+                }, true);
+            }
+            const isAuth = /HTTP 401|\b401\b|expired|revoked|unauthorized|invalid_grant|authentication required|not logged in|please sign in/i.test(message);
             return this.recordError(accountId, {
                 status: 'error',
                 updatedAt: new Date().toISOString(),
-                groups: this.cached.get(accountId)?.snapshot.groups ?? [],
-                error: error instanceof Error ? error.message : String(error),
-            }, false);
+                groups: previous?.groups ?? [],
+                error: message,
+            }, isAuth);
         }
     }
 }

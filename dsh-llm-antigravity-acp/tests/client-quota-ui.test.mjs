@@ -739,7 +739,7 @@ test('QuotaPill follows the selected family: Claude and GPT use their own weekly
   view.unmount()
 })
 
-function recordingService(windowValue = 0, decodeValue = 3, degradeValue = 'truncation', engineValue = 'bridge', compactionValue = true) {
+function recordingService(windowValue = 0, decodeValue = 3, degradeValue = 'truncation', engineValue = 'bridge', compactionValue = true, cliOnlyQuotaValue = false) {
   const patches = []
   const service = {
     status: async () => ({
@@ -752,6 +752,7 @@ function recordingService(windowValue = 0, decodeValue = 3, degradeValue = 'trun
       degradeAction: degradeValue,
       engineMode: engineValue,
       realUsageCompaction: compactionValue,
+      cliOnlyQuota: cliOnlyQuotaValue,
       unlock: { status: 'unlocked' },
     }),
     quota: async () => ({ status: 'ok', updatedAt: new Date(FIXED_NOW).toISOString(), groups: [] }),
@@ -763,6 +764,7 @@ function recordingService(windowValue = 0, decodeValue = 3, degradeValue = 'trun
       if ('degradeAction' in patch) degradeValue = patch.degradeAction
       if ('engineMode' in patch) engineValue = patch.engineMode
       if ('realUsageCompaction' in patch) compactionValue = patch.realUsageCompaction
+      if ('cliOnlyQuota' in patch) cliOnlyQuotaValue = patch.cliOnlyQuota
       return service.status()
     },
   }
@@ -830,6 +832,7 @@ test('SettingsCard renders live settings as value rows that apply the chosen opt
     '降智处理128K截断重答',
     '引擎模式DSH 工具桥接',
     '压缩触发计量按真实账单校准（推荐）',
+    '额度查询方式Cloud Code 直连（含套餐等级）',
   ])
   assert.equal(rows.every((row) => row.props.disabled === false), true)
   const hint = (row) => findOne(row, (node) => node.props && node.props.className === 'dsh-agy-hint')
@@ -839,6 +842,7 @@ test('SettingsCard renders live settings as value rows that apply the chosen opt
   assert.match(hintText(rows[3]), /128K截断重答/)
   assert.match(hintText(rows[4]), /谁来读文件/)
   assert.match(hintText(rows[5]), /真实计费 token/)
+  assert.match(hintText(rows[6]), /零 OAuth 提取/)
 
   // The row opens the choice list inline; the current value carries the check.
   rows[0].props.onClick()
@@ -1064,9 +1068,11 @@ test('SettingsCard switches the degraded-route level, engine mode, and compactio
   const degradeRow = () => findAll(view.tree, (node) => node.props && node.props['aria-expanded'] !== undefined)[3]
   const engineRow = () => findAll(view.tree, (node) => node.props && node.props['aria-expanded'] !== undefined)[4]
   const compactionRow = () => findAll(view.tree, (node) => node.props && node.props['aria-expanded'] !== undefined)[5]
+  const quotaQueryRow = () => findAll(view.tree, (node) => node.props && node.props['aria-expanded'] !== undefined)[6]
   assert.equal(textOf(degradeRow()), 'Degraded routeRe-answer on 128K truncation')
   assert.equal(textOf(engineRow()), 'Engine modeDSH tool bridge')
   assert.equal(textOf(compactionRow()), 'Compaction meterReal billed usage (recommended)')
+  assert.equal(textOf(quotaQueryRow()), 'Quota queryCloud Code direct (with plan tier)')
   degradeRow().props.onClick()
   await flush()
   const options = findAll(view.tree, (node) => node.tag === 'button' && node.props['aria-checked'] !== undefined)
@@ -1100,6 +1106,21 @@ test('SettingsCard switches the degraded-route level, engine mode, and compactio
     { realUsageCompaction: false },
   ])
   assert.equal(textOf(compactionRow()), 'Compaction meterDSH heuristic default')
+
+  quotaQueryRow().props.onClick()
+  await flush()
+  const quotaChoices = findAll(view.tree, (node) => node.tag === 'button' && node.props['aria-checked'] !== undefined)
+  assert.deepEqual(quotaChoices.map(textOf), ['Pure agy CLI (zero OAuth extract)', 'Cloud Code direct (with plan tier)'])
+  assert.equal(quotaChoices[1].props['aria-checked'], true)
+  quotaChoices[0].props.onClick()
+  await flush()
+  assert.deepEqual(JSON.parse(JSON.stringify(patches)), [
+    { degradeAction: 'observe' },
+    { engineMode: 'native' },
+    { realUsageCompaction: false },
+    { cliOnlyQuota: true },
+  ])
+  assert.equal(textOf(quotaQueryRow()), 'Quota queryPure agy CLI (zero OAuth extract)')
   view.unmount()
 })
 
@@ -1131,7 +1152,7 @@ test('SettingsCard paints status with interactive choice rows while quota is sti
   // The status half is already on screen ...
   assert.match(textOf(view.tree), /已连接/)
   const rows = findAll(view.tree, (node) => node.props && node.props['aria-expanded'] !== undefined)
-  assert.equal(rows.length, 6, 'all six choice rows render before quota resolves')
+  assert.equal(rows.length, 7, 'all seven choice rows render before quota resolves')
   assert.deepEqual(rows.map(textOf), [
     '上下文窗口自动 (1M)',
     '默认思考High',
@@ -1139,6 +1160,7 @@ test('SettingsCard paints status with interactive choice rows while quota is sti
     '降智处理128K截断重答',
     '引擎模式DSH 工具桥接',
     '压缩触发计量按真实账单校准（推荐）',
+    '额度查询方式Cloud Code 直连（含套餐等级）',
   ])
   assert.equal(rows.every((row) => row.props.disabled === false), true,
     'a slow quota read must never disable or fade out the choice rows')
@@ -3068,4 +3090,402 @@ test('QuotaPill blocks switching into suspended/expired accounts with badge, Acc
   assert.ok(notice)
   assert.match(textOf(notice), /credential-backups/)
   settingsView.unmount()
+})
+
+// ── Token usage analytics: composer pill "用量" tab and the Settings dashboard ──
+
+const usageModelRow = (overrides = {}) => ({
+  key: 'gemini-4-neon', familyId: 'gemini-4-neon', familyName: 'Gemini 4 Neon', name: 'Gemini 4 Neon', colorGroup: 'neon',
+  calls: 3, inputTokens: 1800, cacheReadTokens: 5000, cacheWriteTokens: 0, outputTokens: 520, thoughtTokens: 270, textOutTokens: 250,
+  totalTokens: 7320, cacheHitRate: 0.7353, estimatedUsd: 0.014, cacheSavingsUsd: 0.0143, share: 0.4537,
+  ...overrides,
+})
+const usageTotals = {
+  calls: 4, inputTokens: 3800, cacheReadTokens: 11000, cacheWriteTokens: 0, outputTokens: 1320, thoughtTokens: 570, textOutTokens: 750,
+  totalTokens: 16120, cacheHitRate: 0.7432, estimatedUsd: 0.029, cacheSavingsUsd: 0.0229,
+}
+function usageSnapshot({ range = 'week', accountId = 'default', groupBy = 'family', includeStandaloneCli = false, withData = true } = {}) {
+  const day = (offset, totalTokens, segments = []) => ({
+    day: `2026-11-${String(23 + offset).padStart(2, '0')}`, label: `${11}/${23 + offset}`,
+    isToday: offset === 3, isFuture: offset > 3, inRange: true,
+    calls: 0, inputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0, thoughtTokens: 0, textOutTokens: 0,
+    totalTokens, cacheHitRate: 0, estimatedUsd: 0, cacheSavingsUsd: 0, segments,
+  })
+  return {
+    status: 'ok',
+    updatedAt: new Date(FIXED_NOW).toISOString(),
+    range,
+    rangeLabel: range === 'month' ? '11/1 – 11/26' : range === '30d' ? '10/28 – 11/26' : range === 'today' ? '2026-11-26' : '11/23 – 11/29',
+    accountId,
+    groupBy,
+    includeStandaloneCli,
+    hasStandaloneCli: true,
+    totals: withData ? { ...usageTotals } : { ...usageTotals, calls: 0, inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, thoughtTokens: 0, totalTokens: 0, cacheHitRate: 0, estimatedUsd: 0, cacheSavingsUsd: 0 },
+    models: withData && groupBy === 'family'
+      ? [
+        usageModelRow({ key: 'gemini-4-hydrogen', familyId: 'gemini-4-hydrogen', familyName: 'Gemini 4 Hydrogen', name: 'Gemini 4 Hydrogen', colorGroup: 'hydrogen', calls: 1, inputTokens: 2000, cacheReadTokens: 6000, outputTokens: 800, thoughtTokens: 300, textOutTokens: 500, totalTokens: 8800, cacheHitRate: 0.75, estimatedUsd: 0.015, cacheSavingsUsd: 0.0086, share: 0.5463 }),
+        usageModelRow(),
+      ]
+      : withData
+        ? [
+          usageModelRow({ key: 'gemini-4-neon::Gemini 4 Neon (XHigh)', name: 'Gemini 4 Neon (XHigh)', calls: 2, inputTokens: 1500, cacheReadTokens: 5000, outputTokens: 400, thoughtTokens: 250, textOutTokens: 150, totalTokens: 6900, share: 0.9426 }),
+          usageModelRow({ key: 'gemini-4-neon::Gemini 4 Neon (High)', name: 'Gemini 4 Neon (High)', calls: 1, inputTokens: 300, cacheReadTokens: 0, outputTokens: 120, thoughtTokens: 20, textOutTokens: 100, totalTokens: 420, cacheHitRate: 0, estimatedUsd: 0.0008, cacheSavingsUsd: 0, share: 0.0574 }),
+        ]
+        : [],
+    daily: [
+      day(0, 6900, [{ familyId: 'gemini-4-neon', name: 'Gemini 4 Neon', colorGroup: 'neon', totalTokens: 6900, estimatedUsd: 0.014 }]),
+      day(1, 0),
+      day(2, 8800, [{ familyId: 'gemini-4-hydrogen', name: 'Gemini 4 Hydrogen', colorGroup: 'hydrogen', totalTokens: 8800, estimatedUsd: 0.015 }]),
+      day(3, 420, [{ familyId: 'gemini-4-neon', name: 'Gemini 4 Neon', colorGroup: 'neon', totalTokens: 420, estimatedUsd: 0.0008 }]),
+      day(4, 0), day(5, 0), day(6, 0),
+    ],
+    accounts: [
+      { accountId: 'default', label: '本机', email: 'me@example.com', system: true, ...usageTotals, share: 0.935 },
+      { accountId: 'acc-work', label: 'Work', email: 'work@example.com', system: false, ...usageTotals, totalTokens: 1050, share: 0.065 },
+    ],
+    scannedFiles: 6, cachedFiles: 0, elapsedMs: 12,
+  }
+}
+const usageAccounts = [
+  { id: 'default', system: true, label: '', email: 'me@example.com', state: 'ready', sessions: 1, enabled: true, cooldowns: [], hasRefreshToken: true },
+  { id: 'acc-work', system: false, label: 'Work', email: 'work@example.com', state: 'idle', sessions: 0, enabled: true, cooldowns: [], hasRefreshToken: true },
+]
+const usageStatus = (overrides = {}) => ({
+  state: 'ready', version: '1.5.16', contextWindow: 1_048_576, configuredContextWindow: 0, defaultEffort: 'high', longDecodeContinuations: 3,
+  degradeAction: 'truncation', engineMode: 'bridge', realUsageCompaction: true, cliOnlyQuota: true, usageStatsSupported: true,
+  platform: 'win32', accounts: usageAccounts, activeAccountId: 'default', unlock: { status: 'unlocked' }, ...overrides,
+})
+
+test('QuotaPill adds a 额度/用量 segmented switcher: quota view is unchanged by default and the Usage tab reads the local ledger lazily', async () => {
+  const calls = []
+  const { registered, mount, intervals, document } = loadClientPlugin({
+    language: 'zh-CN',
+    remoteService: {
+      status: async () => usageStatus(),
+      quota: async () => ({
+        status: 'ok', updatedAt: new Date(FIXED_NOW).toISOString(), accountId: 'default', accountLabel: 'This Mac',
+        groups: [{ kind: 'gemini', name: 'Gemini Models', description: '', buckets: [
+          { id: 'gemini-weekly', name: 'Weekly Limit Remaining', window: 'weekly', remainingFraction: 0.86, resetTime: isoAfterHours(100) },
+          { id: 'gemini-5h', name: 'Five Hour Limit Remaining', window: '5h', remainingFraction: 0.45, resetTime: isoAfterHours(4) },
+        ] }],
+      }),
+      usageStats: async (request) => { calls.push(request); return usageSnapshot({ range: request.range, accountId: request.accountId, groupBy: request.groupBy }) },
+    },
+  })
+  const slot = registered.get('conversation.input.right')
+  const view = mount(slot.Component, slot.meta.inject('session-usage'))
+  await flush()
+
+  const intervalsBefore = intervals.size
+  const pillBtn = findOne(view.tree, (n) => n.tag === 'button')
+  assert.equal(textOf(pillBtn), '周 86%本机', 'the collapsed pill is untouched (the account chip is the existing multi-account behavior)')
+  pillBtn.props.onClick()
+  await flush()
+
+  const dialog = () => findOne(view.tree, (n) => n.props && n.props.role === 'dialog')
+  const seg = (key) => findOne(view.tree, (n) => n.props && n.props['data-agy-seg'] === key)
+  assert.ok(seg('pill-tab:quota'), 'the popover offers the segmented switcher')
+  assert.equal(seg('pill-tab:quota').props['aria-selected'], 'true')
+  assert.equal(seg('pill-tab:quota').props.role, 'tab')
+  assert.equal(textOf(seg('pill-tab:quota')), '额度')
+  assert.equal(textOf(seg('pill-tab:usage')), '用量')
+  assert.equal(calls.length, 0, 'usage is never read while the quota view is shown')
+  assert.equal(findAll(dialog(), (n) => n.props && 'data-bucket-role' in n.props).length, 2, 'the default view is still the quota view')
+  assert.equal(dialog().props.style.minWidth, 268)
+
+  // Switch to the Usage tab: one lazy read follows the account serving the model on screen.
+  seg('pill-tab:usage').props.onClick()
+  await flush()
+  // Requests are built inside the vm sandbox; normalize before deep-comparing.
+  const plain = (value) => JSON.parse(JSON.stringify(value))
+  assert.deepEqual(plain(calls), [{ accountId: 'default', range: 'week', groupBy: 'family', force: false }])
+  assert.equal(seg('pill-tab:usage').props['aria-selected'], 'true')
+  assert.equal(findAll(dialog(), (n) => n.props && 'data-bucket-role' in n.props).length, 0, 'quota windows are replaced by analytics')
+  assert.equal(dialog().props.style.minWidth, 300)
+  // Every setState rebuilds the mini-React tree, so nodes are re-queried after each click.
+  const panel = () => findOne(dialog(), (n) => n.props && n.props.className === 'dsh-agy-usage-pill')
+  const toggleOf = (name) => findOne(panel(), (n) => n.props && n.props['data-agy-usage-model-toggle'] === name)
+  assert.equal(panel().props['data-agy-usage-range'], 'week')
+  assert.equal(panel().props['data-agy-usage-account'], 'default')
+  assert.equal(textOf(findOne(panel(), (n) => n.props && 'data-agy-usage-total' in n.props)), '16.1K', 'tokens(16120) renders as 16.1K')
+  assert.equal(findOne(panel(), (n) => n.props && 'data-agy-usage-total' in n.props).props['data-agy-usage-total'], '16.1K')
+  assert.equal(textOf(findOne(panel(), (n) => n.props && 'data-agy-usage-usd' in n.props)), '≈ $0.03', 'the USD badge sits beside the total')
+  assert.equal(findOne(panel(), (n) => n.props && 'data-agy-usage-cache-hit' in n.props).props['data-agy-usage-cache-hit'], '74%')
+  const summary = textOf(findOne(panel(), (n) => n.props && n.props.className === 'dsh-agy-usage-pill-sub'))
+  assert.match(summary, /缓存命中 74%/)
+  assert.match(summary, /4 次调用/)
+  assert.match(summary, /缓存节省 \$0\.02/)
+
+  const chart = findOne(panel(), (n) => n.props && 'data-agy-usage-chart' in n.props)
+  assert.equal(chart.props['data-agy-usage-chart'], 'week:default', 'the chart is keyed to the view so it re-animates only on change')
+  const cols = findAll(chart, (n) => n.props && 'data-agy-usage-day' in n.props)
+  assert.equal(cols.length, 7)
+  assert.equal(cols[0].props['data-agy-usage-day-total'], '6900')
+  assert.equal(cols[1].props['data-agy-usage-day-total'], '0')
+  assert.match(textOf(findOne(cols[0], (n) => n.props && 'data-agy-usage-tip' in n.props)), /2026-11-23 · 6\.9K/)
+  assert.match(textOf(findOne(cols[1], (n) => n.props && 'data-agy-usage-tip' in n.props)), /无用量/)
+  const stack = findOne(cols[0], (n) => n.props && n.props.className === 'dsh-agy-usage-stack')
+  assert.equal(stack.props.style.height, `${(6900 / 8800) * 100}%`, 'bars scale against the busiest day')
+  assert.equal(findOne(cols[2], (n) => n.props && n.props.className === 'dsh-agy-usage-stack').props.style.height, '100%')
+  assert.equal(findOne(cols[3], (n) => n.props && n.props.className === 'dsh-agy-usage-stack').props.style.height, '4.772727272727273%')
+  assert.equal(findOne(cols[1], (n) => n.props && n.props.className === 'dsh-agy-usage-stack'), null, 'an empty day draws no bar')
+  assert.equal(findOne(cols[3], (n) => n.props && n.props.className === 'dsh-agy-usage-stack').props.style.animationDelay, undefined, 'motion is off in a sandbox without matchMedia')
+  const segs = findAll(stack, (n) => n.props && n.props.className === 'dsh-agy-usage-seg')
+  assert.equal(segs[0].props.style.background, '#3b82f6', 'Neon uses its palette color')
+  assert.equal(segs[0].props.style.flexGrow, 6900, 'segments size by token share')
+  assert.ok(findAll(chart, (n) => n.props && n.props.className === 'dsh-agy-usage-day-label dsh-agy-usage-day-label-today').length === 1)
+
+  const modelRows = findAll(panel(), (n) => n.props && 'data-agy-usage-model-toggle' in n.props)
+  assert.deepEqual(modelRows.map(textOf), ['Gemini 4 Hydrogen8.8K', 'Gemini 4 Neon7.3K'], 'ranking shows a color dot, name, share bar, and total')
+  assert.equal(modelRows[0].props['aria-expanded'], false)
+  modelRows[1].props.onClick()
+  await flush()
+  assert.equal(toggleOf('Gemini 4 Neon').props['aria-expanded'], true)
+  assert.equal(toggleOf('Gemini 4 Hydrogen').props['aria-expanded'], false)
+  const openModel = () => findOne(panel(), (n) => n.props && n.props.className === 'dsh-agy-usage-model dsh-agy-usage-model-open')
+  assert.equal(openModel().props['data-agy-usage-model'], 'gemini-4-neon')
+  const detail = textOf(findOne(openModel(), (n) => n.props && n.props.className === 'dsh-agy-usage-detail'))
+  assert.match(detail, /调用3/)
+  assert.match(detail, /缓存命中74%/)
+  assert.match(detail, /API 牌价\$0\.01/)
+  assert.match(detail, /缓存节省\$0\.01/)
+  for (const [label, value, share] of [['输入', '1.8K', '25%'], ['缓存读取', '5K', '68%'], ['输出', '520', '7%'], ['思考', '270', '4%']]) {
+    const cell = findOne(openModel(), (n) => n.props && n.props.className === 'dsh-agy-usage-detail-cell' && textOf(n).startsWith(label))
+    assert.ok(cell, `${label} cell renders`)
+    assert.equal(textOf(cell), `${label}${value}占比 ${share}`)
+  }
+  // Collapsing again folds the detail away.
+  toggleOf('Gemini 4 Neon').props.onClick()
+  await flush()
+  assert.equal(findOne(panel(), (n) => n.props && n.props.className === 'dsh-agy-usage-model-open'), null)
+
+  // Range chips re-query the ledger; the account chips follow the serving account unless pinned.
+  seg('pill-range:month').props.onClick()
+  await flush()
+  assert.equal(calls.length, 2)
+  assert.deepEqual(plain(calls[1]), { accountId: 'default', range: 'month', groupBy: 'family', force: false })
+  assert.equal(seg('pill-range:month').props['aria-selected'], 'true')
+  assert.equal(findOne(dialog(), (n) => n.props && n.props.className === 'dsh-agy-usage-pill').props['data-agy-usage-range'], 'month')
+  assert.equal(textOf(seg('pill-usage-account:default')), '本机')
+  assert.equal(textOf(seg('pill-usage-account:acc-work')), 'Work')
+  seg('pill-usage-account:all').props.onClick()
+  await flush()
+  assert.deepEqual(plain(calls[2]), { accountId: 'all', range: 'month', groupBy: 'family', force: false })
+
+  // The header refresh on the Usage tab forces a rescan instead of touching quota.
+  const quotaCallsBefore = calls.length
+  const refresh = findAll(dialog(), (n) => n.tag === 'button' && n.props.title === '刷新')
+  assert.equal(refresh.length, 1)
+  refresh[0].props.onClick()
+  await flush()
+  assert.equal(calls.length, quotaCallsBefore + 1)
+  assert.equal(calls[calls.length - 1].force, true)
+
+  // Escape closes; reopening stays on the Usage tab and reads once more (non-forced).
+  document.dispatch('keydown', { key: 'Escape' })
+  assert.equal(dialog(), null)
+  const beforeReopen = calls.length
+  findOne(view.tree, (n) => n.tag === 'button').props.onClick()
+  await flush()
+  assert.equal(seg('pill-tab:usage').props['aria-selected'], 'true')
+  assert.equal(calls.length, beforeReopen + 1)
+  assert.equal(calls[calls.length - 1].force, false)
+  assert.equal(intervals.size, intervalsBefore, 'analytics never adds a background poller')
+  view.unmount()
+})
+
+test('QuotaPill drops a late usage answer that belongs to a previous view', async () => {
+  let resolveFirst
+  const calls = []
+  const { registered, mount } = loadClientPlugin({
+    language: 'en-US',
+    remoteService: {
+      status: async () => usageStatus(),
+      quota: async () => ({ status: 'ok', updatedAt: new Date(FIXED_NOW).toISOString(), accountId: 'default', accountLabel: 'This Mac', groups: [] }),
+      usageStats: (request) => {
+        calls.push(request)
+        if (calls.length === 1) return new Promise((resolve) => { resolveFirst = resolve })
+        return Promise.resolve(usageSnapshot({ range: request.range, accountId: request.accountId }))
+      },
+    },
+  })
+  const slot = registered.get('conversation.input.right')
+  const view = mount(slot.Component, slot.meta.inject('session-usage-late'))
+  await flush()
+  const seg = (key) => findOne(view.tree, (n) => n.props && n.props['data-agy-seg'] === key)
+  findOne(view.tree, (n) => n.tag === 'button').props.onClick()
+  await flush()
+  seg('pill-tab:usage').props.onClick()
+  await flush()
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].range, 'week')
+  // Switch the range while the first read is still pending.
+  seg('pill-range:month').props.onClick()
+  await flush()
+  assert.equal(calls.length, 2)
+  const panel = () => findOne(view.tree, (n) => n.props && n.props.className === 'dsh-agy-usage-pill')
+  assert.equal(panel().props['data-agy-usage-range'], 'month')
+  assert.match(textOf(panel()), /Total tokens/, 'the English label renders')
+  // The stale week answer arrives last and must not overwrite the month view.
+  resolveFirst(usageSnapshot({ range: 'week', accountId: 'default' }))
+  await flush()
+  assert.equal(panel().props['data-agy-usage-range'], 'month')
+  assert.equal(findOne(panel(), (n) => n.props && 'data-agy-usage-total' in n.props).props['data-agy-usage-total'], '16.1K')
+  view.unmount()
+})
+
+test('QuotaPill surfaces usage errors and an empty range without pretending there is data', async () => {
+  let reply = { status: 'error', error: 'ledger locked' }
+  const { registered, mount } = loadClientPlugin({
+    language: 'zh-CN',
+    remoteService: {
+      status: async () => usageStatus(),
+      quota: async () => ({ status: 'ok', updatedAt: new Date(FIXED_NOW).toISOString(), accountId: 'default', accountLabel: 'This Mac', groups: [] }),
+      usageStats: async () => reply,
+    },
+  })
+  const slot = registered.get('conversation.input.right')
+  const view = mount(slot.Component, slot.meta.inject('session-usage-empty'))
+  await flush()
+  findOne(view.tree, (n) => n.tag === 'button').props.onClick()
+  await flush()
+  findOne(view.tree, (n) => n.props && n.props['data-agy-seg'] === 'pill-tab:usage').props.onClick()
+  await flush()
+  const panel = () => findOne(view.tree, (n) => n.props && n.props.className === 'dsh-agy-usage-pill')
+  assert.equal(textOf(findOne(panel(), (n) => n.props && n.props.role === 'alert')), 'ledger locked')
+  assert.equal(findOne(panel(), (n) => n.props && 'data-agy-usage-chart' in n.props), null, 'no chart is drawn for a failed read')
+  assert.equal(textOf(findOne(panel(), (n) => n.props && 'data-agy-usage-total' in n.props)), '0')
+
+  reply = usageSnapshot({ withData: false })
+  findAll(findOne(view.tree, (n) => n.props && n.props.role === 'dialog'), (n) => n.tag === 'button' && n.props.title === '刷新')[0].props.onClick()
+  await flush()
+  assert.equal(findOne(panel(), (n) => n.props && n.props.role === 'alert'), null)
+  assert.equal(textOf(findOne(panel(), (n) => n.props && 'data-agy-usage-empty' in n.props)), '该时间段内暂无用量')
+  assert.equal(textOf(findOne(panel(), (n) => n.props && 'data-agy-usage-total' in n.props)), '0')
+  assert.equal(textOf(findOne(panel(), (n) => n.props && 'data-agy-usage-usd' in n.props)), '≈ $0.00')
+  view.unmount()
+})
+
+test('SettingsCard renders the Token usage dashboard behind the host capability flag: KPIs, daily bars, legend, model detail, and view controls', async () => {
+  const calls = []
+  const { registered, mount } = loadClientPlugin({
+    language: 'zh-CN',
+    remoteService: {
+      status: async () => usageStatus(),
+      // The real host's `warmup` answers `runtime.status()`, capability flag included.
+      warmup: async () => usageStatus(),
+      usageStats: async (request) => { calls.push({ ...request }); return usageSnapshot(request) },
+    },
+  })
+  const slot = registered.get('settings.section')
+  const view = mount(slot.Component, slot.meta.inject())
+  await flush()
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{ accountId: 'all', range: 'week', groupBy: 'family', includeStandaloneCli: false, force: false }], 'the card reads once on mount with the defaults')
+
+  const card = () => findOne(view.tree, (n) => n.props && 'data-agy-usage-card' in n.props)
+  assert.ok(card(), 'the dashboard card renders when the host advertises usageStats')
+  assert.match(textOf(card()), /Token 用量统计/)
+  assert.match(textOf(card()), /本地只读账本 · 零联网请求/)
+  // The settings choice rows keep their positions; only the two model toggles follow them.
+  const expandedRows = findAll(view.tree, (n) => n.props && n.props['aria-expanded'] !== undefined)
+  assert.equal(textOf(expandedRows[6]), '额度查询方式纯 agy 进程（零 OAuth 提取）')
+  const toggles = findAll(view.tree, (n) => n.props && 'data-agy-usage-model-toggle' in n.props)
+  assert.deepEqual(toggles.map((n) => n.props['data-agy-usage-model-toggle']), ['Gemini 4 Hydrogen', 'Gemini 4 Neon'])
+  assert.ok(expandedRows.indexOf(toggles[0]) > 6, 'model toggles render after the seven settings rows')
+
+  const kpi = (key) => findOne(card(), (n) => n.props && n.props['data-agy-kpi'] === key)
+  assert.equal(textOf(kpi('total')), '总消耗16.1KAPI 牌价 ≈ $0.03')
+  assert.equal(textOf(kpi('input')), '非缓存输入3.8K调用次数 4')
+  assert.equal(textOf(kpi('cache')), '缓存读取11K命中率 74%节省 $0.02')
+  assert.equal(textOf(kpi('output')), '输出（含思考）1.3K思考 570')
+  assert.equal(findAll(card(), (n) => n.props && n.props.className === 'dsh-agy-kpi').length, 4)
+  assert.equal(findAll(card(), (n) => n.props && n.props.className === 'dsh-agy-kpi-accent')[0].props.style.background, 'var(--dsw-alias-state-business-primary, #4176e6)')
+
+  assert.equal(textOf(findOne(card(), (n) => n.props && 'data-agy-usage-range-label' in n.props)), '11/23 – 11/29')
+  assert.equal(findAll(card(), (n) => n.props && 'data-agy-usage-day' in n.props).length, 7)
+  const legend = findAll(card(), (n) => n.props && n.props.className === 'dsh-agy-usage-legend-item')
+  assert.deepEqual(legend.map(textOf), ['Gemini 4 Hydrogen', 'Gemini 4 Neon'])
+  assert.equal(findOne(legend[0], (n) => n.props && n.props.className === 'dsh-agy-usage-dot').props.style.background, '#06b6d4')
+  assert.match(textOf(card()), /按公开 API 牌价折算的参考估值，并非订阅账单/)
+
+  const seg = (key) => findOne(card(), (n) => n.props && n.props['data-agy-seg'] === key)
+  const segPrefix = (prefix) => findAll(card(), (n) => n.props && n.props['data-agy-seg'] && String(n.props['data-agy-seg']).startsWith(prefix))
+  assert.deepEqual(segPrefix('dash-range:').map(textOf), ['今日', '本周', '本月', '近30天'])
+  assert.deepEqual(segPrefix('dash-account:').map(textOf), ['全部账号', '本机', 'Work'])
+  assert.deepEqual(segPrefix('dash-group:').map(textOf), ['按模型', '按挡位'])
+
+  // Full (non-compact) model rows expand into the four dimensions plus the cost lines.
+  findOne(card(), (n) => n.props && n.props['data-agy-usage-model-toggle'] === 'Gemini 4 Neon').props.onClick()
+  await flush()
+  const openRow = () => findOne(card(), (n) => n.props && n.props.className === 'dsh-agy-usage-model dsh-agy-usage-model-open')
+  assert.equal(openRow().props['data-agy-usage-model'], 'gemini-4-neon')
+  const detail = textOf(findOne(openRow(), (n) => n.props && n.props.className === 'dsh-agy-usage-detail'))
+  assert.match(detail, /调用3/)
+  assert.match(detail, /缓存命中74%/)
+  assert.match(detail, /API 牌价\$0\.01/)
+  assert.match(detail, /缓存节省\$0\.01/)
+  assert.match(detail, /缓存写入0/)
+
+  // View controls re-query: rolling 30 days, the work account, tier grouping, and the standalone CLI toggle.
+  seg('dash-range:30d').props.onClick()
+  await flush()
+  assert.equal(calls[1].range, '30d')
+  assert.equal(textOf(findOne(card(), (n) => n.props && 'data-agy-usage-range-label' in n.props)), '10/28 – 11/26')
+  seg('dash-account:acc-work').props.onClick()
+  await flush()
+  assert.equal(calls[2].accountId, 'acc-work')
+  assert.equal(card().props['data-agy-usage-account'], 'acc-work')
+  assert.equal(seg('dash-account:acc-work').props['aria-selected'], 'true')
+  assert.equal(seg('dash-account:all').props['aria-selected'], 'false')
+  seg('dash-group:variant').props.onClick()
+  await flush()
+  assert.equal(calls[3].groupBy, 'variant')
+  assert.deepEqual(findAll(card(), (n) => n.props && 'data-agy-usage-model-toggle' in n.props).map(textOf), ['Gemini 4 Neon (XHigh)6.9K$0.01', 'Gemini 4 Neon (High)420<$0.01'])
+  assert.deepEqual(findAll(card(), (n) => n.props && n.props.className === 'dsh-agy-usage-legend-item').map(textOf), ['Gemini 4 Neon'], 'the legend collapses variants back to one family')
+  const toggle = () => findOne(card(), (n) => n.props && n.props['data-agy-usage-include-cli'] === 'true')
+  assert.equal(toggle().props.checked, false)
+  toggle().props.onChange({ target: { checked: true } })
+  await flush()
+  assert.equal(calls[4].includeStandaloneCli, true)
+  assert.equal(toggle().props.checked, true)
+
+  // The card's own refresh forces a rescan; the header refresh (warmup) re-reads too.
+  findOne(view.tree, (n) => n.tag === 'button' && n.props.title === '重新扫描本地会话数据库').props.onClick()
+  await flush()
+  assert.equal(calls[5].force, true)
+  const before = calls.length
+  findOne(view.tree, (n) => n.tag === 'button' && n.props.className === 'dsh-agy-btn dsh-agy-btn-settings').props.onClick()
+  await flush()
+  assert.equal(calls.length, before + 1, 'a header warm-up bumps the reload key and refreshes analytics')
+  view.unmount()
+})
+
+test('SettingsCard and QuotaPill hide every usage surface when the host does not advertise the analytics RPC', async () => {
+  const calls = []
+  const { registered, mount } = loadClientPlugin({
+    language: 'zh-CN',
+    remoteService: {
+      status: async () => usageStatus({ usageStatsSupported: undefined }),
+      quota: async () => ({ status: 'ok', updatedAt: new Date(FIXED_NOW).toISOString(), accountId: 'default', accountLabel: 'This Mac', groups: [] }),
+      usageStats: async (request) => { calls.push(request); return usageSnapshot(request) },
+    },
+  })
+  const settingsSlot = registered.get('settings.section')
+  const settingsView = mount(settingsSlot.Component, settingsSlot.meta.inject())
+  await flush()
+  assert.equal(findOne(settingsView.tree, (n) => n.props && 'data-agy-usage-card' in n.props), null, 'no dashboard card')
+  assert.equal(findOne(settingsView.tree, (n) => n.props && 'data-agy-usage-model-toggle' in n.props), null, 'no model toggles')
+  assert.match(textOf(findAll(settingsView.tree, (n) => n.props && n.props['aria-expanded'] !== undefined)[6]), /^额度查询方式/, 'the settings rows end with the quota query row as before')
+  settingsView.unmount()
+
+  const pillSlot = registered.get('conversation.input.right')
+  const pillView = mount(pillSlot.Component, pillSlot.meta.inject('session-usage-off'))
+  await flush()
+  findOne(pillView.tree, (n) => n.tag === 'button').props.onClick()
+  await flush()
+  const dialog = findOne(pillView.tree, (n) => n.props && n.props.role === 'dialog')
+  assert.equal(findOne(dialog, (n) => n.props && 'data-agy-seg' in n.props), null, 'no tab switcher')
+  assert.equal(findAll(dialog, (n) => n.tag === 'button')[0].props.title, '刷新', 'the refresh button stays first inside the dialog')
+  assert.equal(calls.length, 0, 'the ledger is never read')
+  pillView.unmount()
 })
